@@ -311,7 +311,9 @@ if CommandLine.arguments.contains("--render-test") {
     let args = Array(CommandLine.arguments.dropFirst(2))   // 跳过程序路径与本 flag
     let out = args.first ?? "/tmp/codexdock-render.png"
     let view = DockView(frame: NSRect(x: 0, y: 0, width: 128, height: 128))
-    view.remaining = args.count > 1 ? Int(args[1]) : 92
+    // remaining 传 "nil" 表示无额度数据（横杠「—」），用于覆盖
+    // 「没有数字时不该标 OLD」这条分支
+    view.remaining = args.count > 1 ? (args[1] == "nil" ? nil : Int(args[1])) : 92
     view.cpu = args.count > 2 ? Double(args[2]) : 0.42
     view.memory = args.count > 3 ? Double(args[3]) : 0.61
     view.stale = args.count > 4 ? args[4] == "stale" : false
@@ -511,9 +513,13 @@ final class DockView: NSView {
         }
         backdrop?.draw(in: bounds)
 
-        drawGlyph(stale ? "CODEX · OLD" : "CODEX", at: 91, size: 11, color: .lightGray)
+        // 「旧」标记只在真有数字时出现。没有额度数据时 remaining 为 nil，
+        // 此时标 OLD 等于声称存在一份旧快照，而实际上没有——首次查询失败时
+        // 就是这种情况。横杠「—」本身已经表达了不可用。
+        let markStale = stale && remaining != nil
+        drawGlyph(markStale ? "CODEX · OLD" : "CODEX", at: 91, size: 11, color: .lightGray)
         drawGlyph(remaining.map { "\($0)%" } ?? "—", at: 48, size: 32,
-                  color: stale ? .systemOrange : .white)
+                  color: markStale ? .systemOrange : .white)
 
         // 进度条填充随 cpu/memory 每 5 秒变，形状简单，保持实时绘制。
         // 每个指标占固定槽位（CPU 上、内存下），关闭某项时另一项不移动，
@@ -581,10 +587,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }; self.sleeping = false; self.sampler.reset(); self.startTimers(); self.tick(); self.refresh()
         })
         startTimers(); tick(); refresh()
-        settings = SettingsWindowController(config: config) { [weak self] updated in
-            self?.config = updated
-            self?.configChanged()
-        }
         window.center(); window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -637,6 +639,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let data = sampler.sample(); dock.cpu = data.cpu; dock.memory = data.memory; render()
     }
     @objc func openSettings() {
+        // 懒加载：设置面板有 12 个控件，用户不开设置时建它纯属浪费内存。
+        // 窗口本身常驻内存没意义——不进这个分支就一个控件都不创建。
+        if settings == nil {
+            settings = SettingsWindowController(config: config) { [weak self] updated in
+                self?.config = updated
+                self?.configChanged()
+            }
+        }
         settings.show()
     }
     @objc func refresh() {
@@ -663,7 +673,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func render() {
         dock.remaining = quota?.windows.first?.remaining
-        dock.stale = errorText != nil || (updated.map { Date().timeIntervalSince($0) > 300 } ?? false)
+        // stale 的含义是「有快照但已过期」，所以必须先有数据。
+        // 之前只要有 errorText 就是 stale，首次查询失败（根本没有快照）也会
+        // 被标成过期，详情窗口与 Dock 菜单都靠各自再判一次 quotaAvailable
+        // 才没出错——这类补丁容易漏，改成在源头就不成立。
+        let hasData = quota != nil
+        dock.stale = hasData && (errorText != nil
+                                  || (updated.map { Date().timeIntervalSince($0) > 300 } ?? false))
         dock.showCPU = config.showCPU
         dock.showMemory = config.showMemory
         // 开关必须计入状态串：否则用户关掉 CPU 后图标内容变了却不会重绘

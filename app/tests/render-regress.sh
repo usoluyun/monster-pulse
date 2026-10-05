@@ -33,6 +33,10 @@ CASES=(
   "hide-cpu:92:0.42:0.61:none:no-cpu"
   "hide-mem:92:0.42:0.61:none:no-mem"
   "hide-both:92:0.42:0.61:none:no-both"
+  # 无额度数据：remaining 传 nil（渲染成横杠）。stale 与 no-quota-stale 两个
+  # 用例断言「没有数字时不该标 OLD」——没有快照就谈不上旧数据。
+  "no-quota:nil:0.42:0.61:none:both"
+  "no-quota-stale:nil:0.42:0.61:stale:both"
 )
 
 # 详情窗口的用例。规格只有状态名，由应用内部决定该状态的数据，
