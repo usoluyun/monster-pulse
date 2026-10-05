@@ -16,15 +16,25 @@ import os
 import sys
 
 
-NUMERIC = ("elapsed_s", "root_cpu_s", "child_cpu_s", "total_phys_kb",
-           "peak_phys_kb", "n_children")
+NUMERIC = ("elapsed_s", "root_cpu_s", "child_cpu_s", "app_phys_kb",
+           "child_phys_kb", "peak_app_phys_kb", "peak_child_phys_kb",
+           "n_children")
 
 
 def load(path):
-    """读采样 CSV。label 是字符串标签，别拿去做 float()。"""
+    """读采样 CSV。label 是字符串标签，别拿去做 float()。
+
+    列名变了：原 total_phys_kb / peak_phys_kb 是父子求和，已拆成
+    app_phys_kb 与 child_phys_kb（求和会把共享框架页算两遍，且 codex
+    子进程 footprint 波动巨大，会让结果随采样时机漂移——见 measure.py 说明）。
+    遇到旧格式的 CSV 直接跳过，不静默按错误口径汇总。
+    """
     rows = []
     with open(path) as fh:
         for r in csv.DictReader(l for l in fh if not l.startswith("#")):
+            if "app_phys_kb" not in r:
+                print("  跳过旧格式 CSV（缺 app_phys_kb 列）：%s" % path, file=sys.stderr)
+                return []
             try:
                 rows.append({k: float(r[k]) for k in NUMERIC})
             except (ValueError, TypeError, KeyError):
@@ -40,14 +50,16 @@ def summarize(rows):
         return None
     total_cpu = (rows[-1]["root_cpu_s"] + rows[-1]["child_cpu_s"]
                  - rows[0]["root_cpu_s"] - rows[0]["child_cpu_s"])
-    peak = max(r["peak_phys_kb"] for r in rows)
-    avg_phys = sum(r["total_phys_kb"] for r in rows) / len(rows)
+    peak = max(r["peak_app_phys_kb"] for r in rows)
+    peak_child = max(r["peak_child_phys_kb"] for r in rows)
+    avg_phys = sum(r["app_phys_kb"] for r in rows) / len(rows)
     max_children = max(r["n_children"] for r in rows)
     return {
         "minutes": elapsed / 60.0,
         "cpu_total_s": total_cpu,
         "cpu_avg_pct": total_cpu / elapsed * 100,
         "peak_mb": peak / 1024.0,
+        "peak_child_mb": peak_child / 1024.0,
         "avg_mb": avg_phys / 1024.0,
         "max_children": int(max_children),
     }

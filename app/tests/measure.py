@@ -132,11 +132,23 @@ def main():
     time.sleep(2)   # 稳定期：让启动开销与首次查询落在计量区间之外
 
     writer = csv.writer(sys.stdout)
+    # app_phys 与 child_phys 分开记，不再求和成一个 total_phys。
+    #
+    # 原因（实测定性，2026-10-06，见 docs/codex-dock-verification.md §6 补充）：
+    # 原实现把父进程与子进程 footprint 相加。但每个进程自己的 footprint 都包含
+    # 它那份共享框架页，父子都链接 AppKit/Foundation，求和会把共享页算两遍。
+    # 更要命的是 codex 是 Node 运行时，单进程 footprint 在 36MB（稳态）到
+    # 117MB（峰值）之间波动，于是「合计」完全取决于采样是否恰好撞上子进程存活期
+    # （子进程每次只活 1～2 秒）。实测同一进程内实测到 25MB 与 60MB 两种合计值，
+    # 历史记录里的 133MB 对应子进程处于峰值期。
+    # 那个「关闭窗口后内存涨到 4 倍」就是这么来的——不是内存涨了，是采样口径。
     writer.writerow(["label", "elapsed_s", "root_cpu_s", "child_cpu_s",
-                     "total_phys_kb", "peak_phys_kb", "n_children"])
+                     "app_phys_kb", "child_phys_kb", "peak_app_phys_kb",
+                     "peak_child_phys_kb", "n_children"])
 
     t0 = time.time()
-    peak = 0
+    peak_app = 0
+    peak_child = 0
     n = 0
     while True:
         elapsed = time.time() - t0
@@ -145,11 +157,13 @@ def main():
         kids = descendants(pid)
         root_cpu = cputime_of(pid)
         child_cpu = sum(cputime_of(k) for k in kids)
-        # 物理内存：各进程 footprint 求和（不用 RSS，避免共享页重复计入）
-        phys = footprint_kb(pid) + sum(footprint_kb(k) for k in kids)
-        peak = max(peak, phys)
+        app_phys = footprint_kb(pid)
+        child_phys = sum(footprint_kb(k) for k in kids)
+        peak_app = max(peak_app, app_phys)
+        peak_child = max(peak_child, child_phys)
         writer.writerow([label, f"{elapsed:.1f}", f"{root_cpu:.2f}",
-                         f"{child_cpu:.2f}", phys, peak, len(kids)])
+                         f"{child_cpu:.2f}", app_phys, child_phys,
+                         peak_app, peak_child, len(kids)])
         sys.stdout.flush()
         n += 1
         time.sleep(interval)
@@ -157,7 +171,9 @@ def main():
     # 不终止被测进程：它的状态与存活由调用方决定，这里只负责计量
     total_cpu = cputime_of(pid) + sum(cputime_of(k) for k in descendants(pid))
     print(f"# {label}: 采样 {n} 点 / {duration:.0f}s  "
-          f"末次累计CPU={total_cpu:.1f}s  峰值物理内存={peak/1024:.1f}MB  "
+          f"末次累计CPU={total_cpu:.1f}s  "
+          f"应用物理内存峰值={peak_app/1024:.1f}MB  "
+          f"子进程物理内存峰值={peak_child/1024:.1f}MB（不与应用相加，见上方说明）  "
           f"平均CPU={(total_cpu/duration*100):.2f}%", file=sys.stderr)
 
 

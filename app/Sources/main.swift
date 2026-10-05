@@ -473,6 +473,12 @@ final class DockView: NSView {
     private var backdropStale = false
     private var backdropSize: CGSize = .zero
     private var glyphs: [String: NSImage] = [:]
+    /// glyph 缓存的条目上限。字典本身没有上界：额度百分比会随时间变化，
+    /// 每个新值都是一条新 key。实测单条 glyph 位图约 76 KB（120×41 @2x），
+    /// 取值域上限 104 条（百分比 0…100 加三种标题、两种颜色）合计约 8 MB。
+    /// 不设上界的话，跑久了会把这 8 MB 慢慢吃满。超过上限时整体丢弃重建，
+    /// 代价只是重新排版一次，远小于长期占着几 MB。
+    private static let glyphCacheLimit = 24
 
     // 数字只在变化时重排，key 覆盖「文本+字号+颜色」，取值域有界（百分比 0…100）
     private func drawGlyph(_ text: String, at y: CGFloat, size: CGFloat, color: NSColor) {
@@ -487,6 +493,7 @@ final class DockView: NSView {
                     .foregroundColor: color, .paragraphStyle: DockView.paragraph])
                 return true
             }
+            if glyphs.count >= Self.glyphCacheLimit { glyphs.removeAll() }
             glyphs[key] = image
         }
         image.draw(in: NSRect(x: 4, y: y, width: 120, height: size + 9))
