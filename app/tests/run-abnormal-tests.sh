@@ -6,12 +6,12 @@
 # 不动系统网络，也就不会影响正在跑的 Codex 会话。
 #
 # 用法：
-#   example/codex-dock/tests/run-abnormal-tests.sh            # 全部读层场景
-#   example/codex-dock/tests/run-abnormal-tests.sh unauth     # 单场景
+#   app/tests/run-abnormal-tests.sh            # 全部读层场景
+#   app/tests/run-abnormal-tests.sh unauth     # 单场景
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
-APP=".build/CodexDock.app/Contents/MacOS/CodexDock"
+APP=".build/MonsterPulse.app/Contents/MacOS/MonsterPulse"
 FAKE="$PWD/tests/fake-codex.sh"
 
 # 兜底：没给 CODEX_BIN 时若本机装了 codex，会误用真实 CLI
@@ -19,7 +19,7 @@ REAL_CODEX="$(command -v codex 2>/dev/null || true)"
 
 pass=0; fail=0
 
-# CodexDock 用 isExecutableFile 检查 CODEX_BIN，所以不能写成 "脚本 参数"，
+# MonsterPulse 用 isExecutableFile 检查 CODEX_BIN，所以不能写成 "脚本 参数"，
 # 每个 mode 生成一个独立的可执行 wrapper。
 WRAPDIR="$(mktemp -d)"
 cleanup() { rm -rf "$WRAPDIR"; }
@@ -33,7 +33,7 @@ wrapper_for() {
 
 # 每个场景：名称 | 假 codex 模式 | 期望退出码 | 说明
 # 期望退出码：zero = 应读到额度并成功；nonzero = 应干净报错
-# 用 python3 起子进程并带硬超时：万一 CodexDock 真的挂死，也要能出报告而不是卡住整轮
+# 用 python3 起子进程并带硬超时：万一 MonsterPulse 真的挂死，也要能出报告而不是卡住整轮
 run_case() {
   local name="$1" mode="$2" expect="$3" desc="$4"
   local log; log="$(mktemp)"

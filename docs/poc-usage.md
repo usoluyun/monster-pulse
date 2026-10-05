@@ -1,4 +1,9 @@
-# Codex Dock PoC
+# 构建、打包与测试说明
+
+> 本文原为 `example/codex-dock/README.md`（Codex Dock PoC 使用说明）。2026-10-06 PoC
+> 转正为项目正式源码，**命令与路径已更新为当前形态**（`app/`、`MonsterPulse`）；
+> 下文「验证记录」各节的实测数据属 PoC 阶段历史记录，其中出现的 `CodexDock` 是当时的
+> 可执行文件名，保留原样不改写。
 
 原生 Swift + AppKit 小应用：Dock 上显示 Codex 主额度窗口剩余百分比、CPU（青色）与内存估算（紫色）。点击 Dock 图标查看所有返回窗口和重置时间；关闭窗口后常驻，Command-Q 退出。
 
@@ -9,10 +14,10 @@
 在项目根目录运行：
 
 ```sh
-bash example/codex-dock/build.sh
-example/codex-dock/.build/CodexDock.app/Contents/MacOS/CodexDock --self-test
-example/codex-dock/.build/CodexDock.app/Contents/MacOS/CodexDock --probe
-open example/codex-dock/.build/CodexDock.app
+bash app/build.sh
+app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse --self-test
+app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse --probe
+open app/.build/MonsterPulse.app
 ```
 
 `--self-test` 不联网，验证额度解析、异常数据和真实系统采样。`--probe` 读取当前 CLI 账户的真实订阅额度，成功仅打印百分比、窗口长度与重置时间；不会调用模型或消耗推理额度。网络/登录失败时非零退出，不用模拟数值代替。
@@ -20,7 +25,7 @@ open example/codex-dock/.build/CodexDock.app
 应用从 PATH、`~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 查找 `codex`。可通过绝对路径指定 CLI（直接启动二进制可保证环境变量传入）：
 
 ```sh
-CODEX_BIN=/absolute/path/to/codex example/codex-dock/.build/CodexDock.app/Contents/MacOS/CodexDock
+CODEX_BIN=/absolute/path/to/codex app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse
 ```
 
 自检或探针模式在创建 AppKit 应用之前退出。
@@ -28,11 +33,11 @@ CODEX_BIN=/absolute/path/to/codex example/codex-dock/.build/CodexDock.app/Conten
 ## 打包
 
 ```sh
-bash example/codex-dock/build.sh                    # .app（默认）
-bash example/codex-dock/build.sh --standalone       # 单个可执行文件，不做 bundle
-bash example/codex-dock/build.sh --dmg --sign       # .app 打成 .dmg 并 ad-hoc 签名
-bash example/codex-dock/build.sh --universal        # 额外产出 arm64 + x86_64 通用二进制
-bash example/codex-dock/build.sh -h                 # 用法
+bash app/build.sh                    # .app（默认）
+bash app/build.sh --standalone       # 单个可执行文件，不做 bundle
+bash app/build.sh --dmg --sign       # .app 打成 .dmg 并 ad-hoc 签名
+bash app/build.sh --universal        # 额外产出 arm64 + x86_64 通用二进制
+bash app/build.sh -h                 # 用法
 ```
 
 产物在 `.build/`（已在 `.gitignore` 中）。
@@ -58,14 +63,14 @@ bash example/codex-dock/build.sh -h                 # 用法
 ```sh
 # 1. 用 Developer ID Application 证书签名（不是 ad-hoc）
 codesign --force --options runtime --timestamp \
-  --sign "Developer ID Application: <你的名字> (<TEAMID>)" CodexDock.app
+  --sign "Developer ID Application: <你的名字> (<TEAMID>)" MonsterPulse.app
 
 # 2. 提交公证，keychain-profile 需先存在（存的是 App Store Connect API key）
-xcrun notarytool submit CodexDock.dmg \
+xcrun notarytool submit MonsterPulse.dmg \
   --keychain-profile <PROFILE> --wait
 
 # 3. 盖章，并把公证信息烤进产物
-xcrun stapler staple CodexDock.dmg
+xcrun stapler staple MonsterPulse.dmg
 ```
 
 `--timestamp` 不能省：没有可信时间戳，Gatekeeper 在离线时会因证书过期而拒绝。
@@ -86,8 +91,8 @@ PoC 阶段没必要做这套。
 `tests/` 下有两个脚本，覆盖查询失败与进程退出两类路径：
 
 ```sh
-bash example/codex-dock/tests/run-abnormal-tests.sh    # 查询失败：10 个场景
-bash example/codex-dock/tests/run-termination-tests.sh # 退出路径：3 条
+bash app/tests/run-abnormal-tests.sh    # 查询失败：10 个场景
+bash app/tests/run-termination-tests.sh # 退出路径：3 条
 ```
 
 查询失败场景用 `tests/fake-codex.sh` 经 `CODEX_BIN` 注入故障，不改真实登录状态、
@@ -229,6 +234,6 @@ RSS 的增长几乎全部发生在头 60 秒（95 → 113 MB，属首帧绘制�
 一处说明：`辅助 codex 进程` 全程为 0 不代表没启动过——它每次只活 1～2 秒，60 秒采样
 大概率错过。子进程回收由异常路径测试的残留检查证明（8 个场景跑完无残留），两者互补。
 
-详细分析及性能验收流程：[方案文档](../../docs/codex-dock-feasibility.md)。
+详细分析及性能验收流程：[方案文档](codex-dock-feasibility.md)。
 阶段性验证结论（各项实测数据、数据缺陷、结论边界、方法论与踩坑记录）：
-[验证报告](../../docs/codex-dock-verification.md)。
+[验证报告](codex-dock-verification.md)。

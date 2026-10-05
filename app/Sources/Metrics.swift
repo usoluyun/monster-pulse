@@ -118,7 +118,7 @@ enum CodexReader {
             try input.fileHandleForWriting.write(contentsOf: data)
         }
         try send(["id": 1, "method": "initialize", "params": ["clientInfo": [
-            "name": "drmac_codex_dock_poc", "version": "0.1.0"]]])
+            "name": "monster_pulse", "version": "1.0.0"]]])
         var pending = Data()
         let deadline = ProcessInfo.processInfo.systemUptime + 20
         while ProcessInfo.processInfo.systemUptime < deadline && !cancelled() {

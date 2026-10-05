@@ -9,17 +9,17 @@
 #      不呈单调上升。绝对值受系统状态影响大，这里只看趋势与斜率。
 #
 # 用法：
-#   example/codex-dock/tests/run-leak-test.sh              # 默认 10 分钟，每 60s 采样
-#   LEAK_MINUTES=30 example/codex-dock/tests/run-leak-test.sh
+#   app/tests/run-leak-test.sh              # 默认 10 分钟，每 60s 采样
+#   LEAK_MINUTES=30 app/tests/run-leak-test.sh
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
-APP=".build/CodexDock.app/Contents/MacOS/CodexDock"
+APP=".build/MonsterPulse.app/Contents/MacOS/MonsterPulse"
 MINUTES="${LEAK_MINUTES:-10}"
 INTERVAL="${LEAK_INTERVAL:-60}"
-OUT="${LEAK_OUT:-/tmp/codexdock-leak.csv}"
+OUT="${LEAK_OUT:-/tmp/monsterpulse-leak.csv}"
 
-cleanup() { pkill -9 -x CodexDock 2>/dev/null; }
+cleanup() { pkill -9 -x MonsterPulse 2>/dev/null; }
 trap cleanup EXIT
 
 # footprint 是物理内存口径，比 RSS 可靠（RSS 含共享页且会重复计入）。
@@ -39,12 +39,12 @@ echo "Codex Dock 泄漏测试：${MINUTES} 分钟，每 ${INTERVAL}s 采样"
 echo "注意：过程中请不要手动打开/关闭详情窗，也不要按刷新按钮"
 echo
 
-CODEX_BIN="${CODEX_BIN:-$(command -v codex)}" "$APP" >/tmp/codexdock-leak.log 2>&1 &
+CODEX_BIN="${CODEX_BIN:-$(command -v codex)}" "$APP" >/tmp/monsterpulse-leak.log 2>&1 &
 app_pid=$!
 sleep 5
 
 if ! kill -0 "$app_pid" 2>/dev/null; then
-  echo "FAIL: 应用启动失败"; cat /tmp/codexdock-leak.log; exit 1
+  echo "FAIL: 应用启动失败"; cat /tmp/monsterpulse-leak.log; exit 1
 fi
 
 printf 'elapsed_s,rss_kb,phys_footprint_kb,num_threads,num_fds,child_codex,swaps\n' >"$OUT"

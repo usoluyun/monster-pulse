@@ -25,7 +25,7 @@ SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 cd "$(dirname "$SELF")"
 
 ARCH="$(uname -m)"
-APP_NAME="CodexDock"
+APP_NAME="MonsterPulse"
 APP=".build/${APP_NAME}.app"
 BIN="${APP}/Contents/MacOS/${APP_NAME}"
 MODE=app

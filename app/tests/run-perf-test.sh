@@ -9,14 +9,14 @@
 # 唤醒次数需要 powermetrics（sudo），本脚本不采集，结论里单独标注为未覆盖。
 #
 # 用法：
-#   example/codex-dock/tests/run-perf-test.sh
-#   PERF_ROUNDS=3 PERF_CYCLE_MINUTES=15 example/codex-dock/tests/run-perf-test.sh
+#   app/tests/run-perf-test.sh
+#   PERF_ROUNDS=3 PERF_CYCLE_MINUTES=15 app/tests/run-perf-test.sh
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
 MEASURE="$PWD/tests/measure.py"
-APP="$PWD/.build/CodexDock.app/Contents/MacOS/CodexDock"
-OUT="${PERF_OUT:-/tmp/codexdock-perf}"
+APP="$PWD/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse"
+OUT="${PERF_OUT:-/tmp/monsterpulse-perf}"
 ROUNDS="${PERF_ROUNDS:-1}"
 CYCLE_MINUTES="${PERF_CYCLE_MINUTES:-15}"
 INTERVAL="${PERF_INTERVAL:-60}"
@@ -24,14 +24,14 @@ INTERVAL="${PERF_INTERVAL:-60}"
 mkdir -p "$OUT"
 
 cleanup() {
-  pkill -9 -x CodexDock 2>/dev/null
+  pkill -9 -x MonsterPulse 2>/dev/null
   osascript -e 'tell application "Activity Monitor" to quit' 2>/dev/null
   sleep 1
 }
 trap cleanup EXIT
 
 close_window() {
-  osascript -e 'tell application "System Events" to tell process "CodexDock"
+  osascript -e 'tell application "System Events" to tell process "MonsterPulse"
     if exists window 1 then perform action "AXClose" of window 1
   end tell' 2>/dev/null || true
   sleep 2
@@ -49,10 +49,10 @@ run_dock() { # 标签  是否关闭详情窗
   local pid=$!
   sleep 6   # 等首帧绘制与首次额度查询完成
   [ "$close" = "yes" ] && close_window
-  echo "  → CodexDock pid=$pid 详情$( [ "$close" = yes ] && echo 关闭 || echo 打开 )"
+  echo "  → MonsterPulse pid=$pid 详情$( [ "$close" = yes ] && echo 关闭 || echo 打开 )"
   python3 "$MEASURE" --pid "$pid" "$label" "$(( CYCLE_MINUTES * 60 ))" "$INTERVAL" \
     >"$OUT/$label.csv"
-  pkill -9 -x CodexDock 2>/dev/null
+  pkill -9 -x MonsterPulse 2>/dev/null
 }
 
 run_activity_monitor() { # 标签
@@ -71,10 +71,10 @@ run_activity_monitor() { # 标签
 }
 
 for round in $(seq 1 "$ROUNDS"); do
-  echo "[$round/$ROUNDS] CodexDock · 详情关闭（基线场景）· ${CYCLE_MINUTES} 分钟"
+  echo "[$round/$ROUNDS] MonsterPulse · 详情关闭（基线场景）· ${CYCLE_MINUTES} 分钟"
   run_dock "dock-r$round-baseline" yes
 
-  echo "[$round/$ROUNDS] CodexDock · 详情打开 · ${CYCLE_MINUTES} 分钟"
+  echo "[$round/$ROUNDS] MonsterPulse · 详情打开 · ${CYCLE_MINUTES} 分钟"
   run_dock "dock-r$round-detail" no
 
   echo "[$round/$ROUNDS] Activity Monitor · 窗口打开 · ${CYCLE_MINUTES} 分钟"

@@ -7,7 +7,7 @@
   · 「可接受差值以本机基线建立，PoC 不预先编造 MB 或百分比承诺」——
     所以这里只做对比陈述，不预设阈值
 
-用法：python3 perf-summary.py /tmp/codexdock-perf
+用法：python3 perf-summary.py /tmp/monsterpulse-perf
 """
 
 import csv
@@ -72,16 +72,16 @@ def mean(xs):
 
 
 def main():
-    outdir = sys.argv[1] if len(sys.argv) > 1 else "/tmp/codexdock-perf"
+    outdir = sys.argv[1] if len(sys.argv) > 1 else "/tmp/monsterpulse-perf"
     g = collect(outdir)
     dock, am = g["dock"], g["am"]
     if not dock:
-        sys.exit("没有找到 CodexDock 采样文件（%s/dock-*.csv）" % outdir)
+        sys.exit("没有找到 MonsterPulse 采样文件（%s/dock-*.csv）" % outdir)
 
     print("=" * 78)
-    print("性能验收汇总：%d 轮 CodexDock vs %d 轮 活动监视器" % (len(dock), len(am)))
+    print("性能验收汇总：%d 轮 MonsterPulse vs %d 轮 活动监视器" % (len(dock), len(am)))
     print("=" * 78)
-    for label, runs in (("CodexDock", dock), ("活动监视器", am)):
+    for label, runs in (("MonsterPulse", dock), ("活动监视器", am)):
         if not runs:
             continue
         print("\n%s" % label)
@@ -104,7 +104,7 @@ def main():
     d_cpu, a_cpu = mean([r["cpu_avg_pct"] for r in dock]), mean([r["cpu_avg_pct"] for r in am])
     d_mem, a_mem = mean([r["avg_mb"] for r in dock]), mean([r["avg_mb"] for r in am])
     print("\n" + "-" * 78)
-    print("对比（CodexDock 相对 活动监视器）")
+    print("对比（MonsterPulse 相对 活动监视器）")
     print("-" * 78)
     for name, d, a, lower_better in (("平均 CPU", d_cpu, a_cpu, True),
                                      ("平均物理内存", d_mem, a_mem, True)):
@@ -112,7 +112,7 @@ def main():
             continue
         ratio = d / a
         verdict = "低于（达标）" if (ratio < 1) == lower_better else "高于（未达标）"
-        print("  %-14s CodexDock %8.2f  vs  活动监视器 %8.2f  →  %5.1f%%  %s" % (
+        print("  %-14s MonsterPulse %8.2f  vs  活动监视器 %8.2f  →  %5.1f%%  %s" % (
             name, d, a, ratio * 100, verdict))
     print("\n未覆盖：唤醒次数与能耗（需 powermetrics + sudo）。")
     print("峰值内存对比见上表；文档要求同时检查峰值是否出现不可接受的回退。")

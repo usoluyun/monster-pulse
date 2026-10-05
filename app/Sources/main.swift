@@ -62,7 +62,7 @@ if CommandLine.arguments.contains("--draw-bench") {
 }
 if CommandLine.arguments.contains("--render-test") {
     // 把 Dock 图标离屏渲染成 PNG，用于回归对比：改 draw() 后要确认视觉未变。
-    // 用法: CodexDock --render-test <out.png> [remaining] [cpu] [memory] [stale]
+    // 用法: MonsterPulse --render-test <out.png> [remaining] [cpu] [memory] [stale]
     let args = Array(CommandLine.arguments.dropFirst(2))   // 跳过程序路径与本 flag
     let out = args.first ?? "/tmp/codexdock-render.png"
     let view = DockView(frame: NSRect(x: 0, y: 0, width: 128, height: 128))
@@ -179,12 +179,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         queue.maxConcurrentOperationCount = 1
         NSApp.setActivationPolicy(.regular)
         let menu = NSMenu(), appItem = NSMenuItem(), submenu = NSMenu()
-        submenu.addItem(withTitle: "退出 Codex Dock", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        submenu.addItem(withTitle: "退出 Monster Pulse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = submenu; menu.addItem(appItem); NSApp.mainMenu = menu
         NSApp.dockTile.contentView = dock
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 400),
             styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "Codex Dock · PoC"; window.isReleasedWhenClosed = false
+        window.title = "Monster Pulse"; window.isReleasedWhenClosed = false
         details.frame = NSRect(x: 24, y: 75, width: 412, height: 300)
         details.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         window.contentView?.addSubview(details)

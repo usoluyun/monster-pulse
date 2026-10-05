@@ -9,12 +9,12 @@
 #
 # 用 hang 模式注入：辅助进程挂住不响应，查询持续 20s，足够在查询期间动手。
 #
-# 用法：example/codex-dock/tests/run-termination-tests.sh
+# 用法：app/tests/run-termination-tests.sh
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
-APP=".build/CodexDock.app/Contents/MacOS/CodexDock"
-BUNDLE_ID="local.drmac.codex-dock"
+APP=".build/MonsterPulse.app/Contents/MacOS/MonsterPulse"
+BUNDLE_ID="local.monsterpulse"
 FAKE="$PWD/tests/fake-codex.sh"
 
 WRAPDIR="$(mktemp -d)"
@@ -24,7 +24,7 @@ chmod +x "$WRAP"
 
 cleanup() {
   pkill -9 -f "$FAKE" 2>/dev/null
-  pkill -9 -x CodexDock 2>/dev/null
+  pkill -9 -x MonsterPulse 2>/dev/null
 }
 # 只在退出时删 wrapper 目录：循环开头调 cleanup 时不能删，否则 app 拿到已删除的 CODEX_BIN
 trap 'cleanup; rm -rf "$WRAPDIR"' EXIT
@@ -39,7 +39,7 @@ echo
 for mode in quit term kill; do
   cleanup; sleep 1
 
-  CODEX_BIN="$WRAP" "$APP" >/tmp/codexdock-term.log 2>&1 &
+  CODEX_BIN="$WRAP" "$APP" >/tmp/monsterpulse-term.log 2>&1 &
   app_pid=$!
   sleep 3   # hang 模式下查询会持续 20s，此刻正处于查询进行中
 
@@ -47,7 +47,7 @@ for mode in quit term kill; do
   if [ "$before" = "0" ]; then
     fail=$((fail+1))
     printf '  FAIL  %-16s 应用未能在 3s 内拉起辅助子进程，测试前置不成立\n' "$mode"
-    cat /tmp/codexdock-term.log
+    cat /tmp/monsterpulse-term.log
     continue
   fi
 

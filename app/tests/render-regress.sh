@@ -15,7 +15,7 @@
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
-APP=".build/CodexDock.app/Contents/MacOS/CodexDock"
+APP=".build/MonsterPulse.app/Contents/MacOS/MonsterPulse"
 BASE="tests/baseline"
 TOL="${TOL:-24}"
 WORK="$(mktemp -d)"

@@ -3,7 +3,8 @@
 > 记录时间：2026-10-05
 > 触发原因：README §验证记录 遗留四项未完成的验收项（2026-10-04 记录）
 > 验证对象：`example/codex-dock`，Apple Silicon / Release(-O) / Codex CLI 0.160.0
-> 相关文档：[可行性方案](codex-dock-feasibility.md)、[使用与限制](../example/codex-dock/README.md)
+> 相关文档：[可行性方案](codex-dock-feasibility.md)、[使用与限制](poc-usage.md)
+> 路径说明：本文记录的验证对象当时位于 `example/codex-dock`，2026-10-06 已转正为 `app/`
 
 ## 摘要
 

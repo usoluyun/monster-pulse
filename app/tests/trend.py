@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """分析泄漏测试采样，判断各指标是平稳、上升还是下降。
 
-用法：python3 trend.py /tmp/codexdock-leak.csv
+用法：python3 trend.py /tmp/monsterpulse-leak.csv
 
 判据用的是「预热后区间的线性斜率」而不是首尾差：
 单次采样抖动很大（额度轮询会短暂拉起子进程），
@@ -62,7 +62,7 @@ def verdict(stat):
 
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/codexdock-leak.csv"
+    path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/monsterpulse-leak.csv"
     with open(path) as fh:
         rows = list(csv.DictReader(fh))
     if len(rows) < 3:

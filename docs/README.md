@@ -1,11 +1,16 @@
 # Monster Pulse 文档
 
+## 设计
+
 - [可行性方案与 PoC 设计](codex-dock-feasibility.md)：产品范围、数据来源、技术实现与性能验收方法。
+
+## 验证
+
 - [阶段性验证报告](codex-dock-verification.md)：异常查询、退出清理、长期运行、绘制成本及待解决问题。
-- [PoC 使用说明](../example/codex-dock/README.md)：构建、运行、打包和测试。
+- [构建、打包与测试说明](poc-usage.md)：构建、运行、打包、异常路径测试与视觉回归。
 
 ## 文档沿革
 
-上述文档从 dr.mac 的 Codex Dock PoC 迁入，保留原始日期、测量数据和历史名称，目录引用已适配本项目。Monster Pulse 是产品名，Codex Dock 是当前 PoC 名称。
+上述文档从 dr.mac 的 Codex Dock PoC 迁入，保留原始日期、测量数据和历史名称。2026-10-06 PoC 转正为项目正式源码（`example/codex-dock/` → `app/`，可执行文件 `CodexDock` → `MonsterPulse`），**但文档正文中的文件名与原始记录保持原样**，以免破坏可追溯性。文档描述的是转正前的实测状态，代码行为在转正时未变更。
 
 性能证据仍不完整，不能据现有记录声称资源占用目标已达成。后续实测应追加日期、环境和结论，避免覆盖历史结果。

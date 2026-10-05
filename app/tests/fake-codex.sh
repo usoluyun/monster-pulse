@@ -1,10 +1,10 @@
 #!/bin/bash
 # 故障注入用的假 Codex CLI。真实 codex 走 app-server 协议，这里只回最小 JSON-RPC。
-# 由 tests/run-abnormal-tests.sh 按场景选用，通过 CODEX_BIN 注入 CodexDock。
+# 由 tests/run-abnormal-tests.sh 按场景选用，通过 CODEX_BIN 注入 MonsterPulse。
 
 mode="${1:-ok}"
 
-# CodexDock 把子进程 stderr 接到 nullDevice，排障时靠这个文件看它实际收到了什么。
+# MonsterPulse 把子进程 stderr 接到 nullDevice，排障时靠这个文件看它实际收到了什么。
 TRACE="${FAKE_CODEX_TRACE:-/tmp/fake-codex-trace.log}"
 say() { echo "[fake-codex:$mode] $*" >>"$TRACE"; }
 say "start args=$*"
