@@ -18,21 +18,45 @@ struct Config {
     static let defaultSystemInterval = 5.0
     static let defaultQuotaInterval = 120.0
 
+    /// 预警阈值。取值范围同样有界，便于滑杆与文案一致。
+    static let alertThresholdRange: ClosedRange<Double> = 5...90
+    static let alertLeadRange: ClosedRange<Double> = 5...180
+    static let alertStreakRange: ClosedRange<Double> = 1...10
+
+    static let defaultAlertThreshold = 20.0
+    static let defaultAlertLead = 30.0
+    static let defaultAlertStreak = 3.0
+
     private enum Key {
         static let systemInterval = "systemSampleInterval"
         static let quotaInterval = "quotaRefreshInterval"
         static let showCPU = "showCPU"
         static let showMemory = "showMemory"
+        static let alertsEnabled = "alertsEnabled"
+        static let alertThreshold = "alertQuotaThreshold"
+        static let alertLead = "alertResetLeadMinutes"
+        static let alertStreak = "alertFailureStreak"
     }
 
     var systemInterval: Double
     var quotaInterval: Double
     var showCPU: Bool
     var showMemory: Bool
+    var alertsEnabled: Bool
+    /// 主额度窗口剩余低于此百分比即预警
+    var alertQuotaThreshold: Double
+    /// 重置时间在此分钟数内即预警
+    var alertResetLeadMinutes: Double
+    /// 连续失败达到此次数即预警
+    var alertFailureStreak: Double
 
     static let `default` = Config(systemInterval: defaultSystemInterval,
                                   quotaInterval: defaultQuotaInterval,
-                                  showCPU: true, showMemory: true)
+                                  showCPU: true, showMemory: true,
+                                  alertsEnabled: true,
+                                  alertQuotaThreshold: defaultAlertThreshold,
+                                  alertResetLeadMinutes: defaultAlertLead,
+                                  alertFailureStreak: defaultAlertStreak)
 
     /// 每次启动都要调用，把默认值注册进易失域。
     static func registerDefaults() {
@@ -41,13 +65,17 @@ struct Config {
             Key.quotaInterval: defaultQuotaInterval,
             Key.showCPU: true,
             Key.showMemory: true,
+            Key.alertsEnabled: true,
+            Key.alertThreshold: defaultAlertThreshold,
+            Key.alertLead: defaultAlertLead,
+            Key.alertStreak: defaultAlertStreak,
         ])
     }
 
     static func load() -> Config {
         let d = UserDefaults.standard
         // 越界值要夹回区间：配置文件可能被手改或来自旧版本，
-        // 直接拿去做 Timer 间隔会让定时器行为不可预期
+        // 直接拿去做 Timer 间隔或阈值会让行为不可预期
         let clamp = { (value: Double, range: ClosedRange<Double>, fallback: Double) in
             guard value.isFinite, range.contains(value) else { return fallback }
             return value
@@ -58,7 +86,14 @@ struct Config {
             quotaInterval: clamp(d.double(forKey: Key.quotaInterval),
                                  quotaIntervalRange, defaultQuotaInterval),
             showCPU: d.bool(forKey: Key.showCPU),
-            showMemory: d.bool(forKey: Key.showMemory))
+            showMemory: d.bool(forKey: Key.showMemory),
+            alertsEnabled: d.bool(forKey: Key.alertsEnabled),
+            alertQuotaThreshold: clamp(d.double(forKey: Key.alertThreshold),
+                                       alertThresholdRange, defaultAlertThreshold),
+            alertResetLeadMinutes: clamp(d.double(forKey: Key.alertLead),
+                                         alertLeadRange, defaultAlertLead),
+            alertFailureStreak: clamp(d.double(forKey: Key.alertStreak),
+                                      alertStreakRange, defaultAlertStreak))
     }
 
     /// 保存单项变更。写入即生效，由调用方负责重启定时器。
@@ -78,10 +113,27 @@ struct Config {
         showMemory = value
         UserDefaults.standard.set(value, forKey: Key.showMemory)
     }
+    mutating func setAlertsEnabled(_ value: Bool) {
+        alertsEnabled = value
+        UserDefaults.standard.set(value, forKey: Key.alertsEnabled)
+    }
+    mutating func setAlertThreshold(_ value: Double) {
+        alertQuotaThreshold = Self.alertThresholdRange.contains(value) ? value : Self.defaultAlertThreshold
+        UserDefaults.standard.set(alertQuotaThreshold, forKey: Key.alertThreshold)
+    }
+    mutating func setAlertLead(_ value: Double) {
+        alertResetLeadMinutes = Self.alertLeadRange.contains(value) ? value : Self.defaultAlertLead
+        UserDefaults.standard.set(alertResetLeadMinutes, forKey: Key.alertLead)
+    }
+    mutating func setAlertStreak(_ value: Double) {
+        alertFailureStreak = Self.alertStreakRange.contains(value) ? value : Self.defaultAlertStreak
+        UserDefaults.standard.set(alertFailureStreak, forKey: Key.alertStreak)
+    }
 
     mutating func resetToDefaults() {
         self = .default
-        for key in [Key.systemInterval, Key.quotaInterval, Key.showCPU, Key.showMemory] {
+        for key in [Key.systemInterval, Key.quotaInterval, Key.showCPU, Key.showMemory,
+                    Key.alertsEnabled, Key.alertThreshold, Key.alertLead, Key.alertStreak] {
             UserDefaults.standard.removeObject(forKey: key)
         }
     }
@@ -92,15 +144,35 @@ struct Config {
     var quotaTolerance: TimeInterval { max(1, quotaInterval * 0.125) }
 }
 
+
 // MARK: - 设置面板
 
-/// 设置窗口。改动即时生效（写 UserDefaults 并回调 AppDelegate 重启定时器），
-/// 不设「确定/取消」——取消语义在这里没有意义，用户拖完滑杆就期待看到效果。
+/// 设置窗口。改动即时生效（写 UserDefaults 并回调 AppDelegate），不设
+/// 「确定/取消」——取消语义在这里没有意义，用户拖完滑杆就期待看到效果。
+///
+/// 布局用行列表而非硬编码坐标：每行声明「视图 + 高度 + 与上一行的间距」，
+/// 加一项配置只需 append 一行，窗口高度由内容算出。加控件时如果改成手写
+/// y 坐标，前几次改动就已经把控件挤出过边界。
 final class SettingsWindowController: NSObject, NSWindowDelegate {
+    private struct Row {
+        let view: NSView
+        let height: CGFloat
+        let gapBefore: CGFloat
+    }
+
+    private static let inset: CGFloat = 24
+    private static let labelWidth: CGFloat = 112
+    private static let sliderWidth: CGFloat = 150
+    private static let windowWidth: CGFloat = 400
+    private static let bottomBar: CGFloat = 48
+
     private let window: NSWindow
+    private let content = NSView()
+    private var rows: [Row] = []
     private var config: Config
     private let onChange: (Config) -> Void
 
+    // 刷新频率
     private let systemSlider = NSSlider(value: 5, minValue: Config.systemIntervalRange.lowerBound,
                                         maxValue: Config.systemIntervalRange.upperBound,
                                         target: nil, action: nil)
@@ -109,84 +181,163 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
                                        maxValue: Config.quotaIntervalRange.upperBound,
                                        target: nil, action: nil)
     private let quotaLabel = NSTextField(labelWithString: "")
-    private let cpuCheckbox = NSButton(checkboxWithTitle: "在图标与详情中显示 CPU", target: nil, action: nil)
-    private let memoryCheckbox = NSButton(checkboxWithTitle: "在图标与详情中显示内存", target: nil, action: nil)
+    // 显示
+    private let cpuCheckbox = NSButton(checkboxWithTitle: "在图标与详情中显示 CPU",
+                                        target: nil, action: nil)
+    private let memoryCheckbox = NSButton(checkboxWithTitle: "在图标与详情中显示内存",
+                                          target: nil, action: nil)
+    // 预警
+    private let alertsCheckbox = NSButton(checkboxWithTitle: "启用额度预警（Dock 图标跳动）",
+                                          target: nil, action: nil)
+    private let thresholdSlider = NSSlider(value: 20, minValue: Config.alertThresholdRange.lowerBound,
+                                          maxValue: Config.alertThresholdRange.upperBound,
+                                          target: nil, action: nil)
+    private let thresholdLabel = NSTextField(labelWithString: "")
+    private let leadSlider = NSSlider(value: 30, minValue: Config.alertLeadRange.lowerBound,
+                                      maxValue: Config.alertLeadRange.upperBound,
+                                      target: nil, action: nil)
+    private let leadLabel = NSTextField(labelWithString: "")
+    private let streakSlider = NSSlider(value: 3, minValue: Config.alertStreakRange.lowerBound,
+                                        maxValue: Config.alertStreakRange.upperBound,
+                                        target: nil, action: nil)
+    private let streakLabel = NSTextField(labelWithString: "")
 
     init(config: Config, onChange: @escaping (Config) -> Void) {
         self.config = config
         self.onChange = onChange
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 260),
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: Self.windowWidth, height: 480),
                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
         super.init()
         window.title = "Monster Pulse 设置"
         window.isReleasedWhenClosed = false
         window.delegate = self
-        buildContent()
-        refreshControls()
+        buildRows()
     }
 
-    private func buildContent() {
-        let inset: CGFloat = 24
-        let labelWidth: CGFloat = 108
-        let sliderWidth: CGFloat = 150
-        let content = NSView(frame: NSRect(x: 0, y: 0, width: 400, height: 260))
+    // MARK: 行构建
+
+    private func heading(_ text: String) -> NSView {
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        return label
+    }
+
+    private func append(_ view: NSView, height: CGFloat, gapBefore: CGFloat) {
+        content.addSubview(view)
+        rows.append(Row(view: view, height: height, gapBefore: gapBefore))
+    }
+
+    private func buildRows() {
         content.wantsLayer = true
+        append(heading("刷新频率"), height: 15, gapBefore: 0)
+        appendSlider(systemLabel, systemSlider, height: 17, gapBefore: 10)
+        appendSlider(quotaLabel, quotaSlider, height: 17, gapBefore: 8)
 
-        let heading = NSTextField(labelWithString: "刷新频率")
-        heading.font = .systemFont(ofSize: 11, weight: .semibold)
-        heading.textColor = .secondaryLabelColor
-        content.addSubview(heading)
-
-        for item in [(systemLabel, systemSlider), (quotaLabel, quotaSlider)] {
-            let (label, slider) = item
-            label.font = .systemFont(ofSize: 12)
-            slider.target = self
-            slider.action = #selector(sliderChanged(_:))
-            slider.isContinuous = true
-            slider.numberOfTickMarks = 0
-            content.addSubview(label)
-            content.addSubview(slider)
-        }
-
+        append(heading("显示"), height: 15, gapBefore: 20)
         for box in [cpuCheckbox, memoryCheckbox] {
             box.target = self
             box.action = #selector(checkboxChanged(_:))
-            content.addSubview(box)
+            append(box, height: 20, gapBefore: box === cpuCheckbox ? 10 : 4)
         }
+
+        append(heading("预警"), height: 15, gapBefore: 20)
+        alertsCheckbox.target = self
+        alertsCheckbox.action = #selector(checkboxChanged(_:))
+        append(alertsCheckbox, height: 20, gapBefore: 10)
+        appendSlider(thresholdLabel, thresholdSlider, height: 17, gapBefore: 8)
+        appendSlider(leadLabel, leadSlider, height: 17, gapBefore: 6)
+        appendSlider(streakLabel, streakSlider, height: 17, gapBefore: 6)
 
         let reset = NSButton(title: "恢复默认", target: self, action: #selector(resetToDefaults))
-        reset.tag = 300
         content.addSubview(reset)
+        resetButton = reset
 
-        content.frame = NSRect(x: 0, y: 0, width: 400, height: 260)
-        // 手动排版，与项目既有风格一致（不引 Auto Layout）
-        heading.frame = NSRect(x: inset, y: 260 - 36, width: 352, height: 15)
-        for (index, item) in [(systemLabel, systemSlider), (quotaLabel, quotaSlider)].enumerated() {
-            let y = CGFloat(260 - 68 - index * 34)
-            item.0.frame = NSRect(x: inset, y: y, width: labelWidth, height: 17)
-            item.1.frame = NSRect(x: inset + labelWidth + 8, y: y, width: sliderWidth, height: 17)
-        }
-        for (index, box) in [cpuCheckbox, memoryCheckbox].enumerated() {
-            box.frame = NSRect(x: inset, y: CGFloat(260 - 152 - index * 26), width: 352, height: 20)
-        }
-        reset.frame = NSRect(x: inset, y: 20, width: 100, height: 28)
+        content.frame = NSRect(x: 0, y: 0, width: Self.windowWidth, height: 1)
         window.contentView = content
+        layoutRows()
+        refreshControls()
     }
+
+    private var resetButton: NSButton!
+
+    /// 滑杆行的实际视图是「标签容器」，这里用标签本身占位（宽度固定），
+    /// 滑杆单独定位在标签右侧。
+    private func appendSlider(_ label: NSTextField, _ slider: NSSlider,
+                              height: CGFloat, gapBefore: CGFloat) {
+        label.font = .systemFont(ofSize: 12)
+        slider.target = self
+        slider.action = #selector(sliderChanged(_:))
+        slider.isContinuous = true
+        slider.numberOfTickMarks = 0
+        content.addSubview(label)
+        content.addSubview(slider)
+        rows.append(Row(view: label, height: height, gapBefore: gapBefore))
+        rows.append(Row(view: slider, height: height, gapBefore: -height))  // 与标签同行
+    }
+
+    /// 从上往下排版，再按内容高度调整窗口。
+    private func layoutRows() {
+        var cursor = content.bounds.height
+        var pendingGap: CGFloat = 0
+        var lastLabel: NSTextField?
+        var labelY: CGFloat = 0
+        for row in rows {
+            if row.gapBefore >= 0 { cursor -= pendingGap; pendingGap = row.gapBefore }
+            cursor -= row.height
+            let isSlider = row.view is NSSlider
+            if isSlider, let label = lastLabel {
+                // 滑杆与前一个标签同行，共用 labelY
+                row.view.frame = NSRect(x: Self.inset + Self.labelWidth + 8, y: labelY,
+                                        width: Self.sliderWidth, height: row.height)
+                continue
+            }
+            row.view.frame = NSRect(x: Self.inset, y: cursor,
+                                    width: Self.windowWidth - Self.inset * 2, height: row.height)
+            lastLabel = row.view as? NSTextField
+            labelY = cursor
+        }
+    }
+
+    /// 窗口高度 = 内容高 + 上下留白 + 底部按钮条
+    private var contentHeight: CGFloat {
+        rows.reduce(0) { $0 + $1.height + max(0, $1.gapBefore) }
+    }
+
+    private func resizeWindow() {
+        let height = contentHeight + Self.inset * 2 + Self.bottomBar
+        content.frame = NSRect(x: 0, y: 0, width: Self.windowWidth, height: height)
+        layoutRows()
+        resetButton.frame = NSRect(x: Self.inset, y: 14, width: 100, height: 28)
+    }
+
+    // MARK: 交互
 
     private func refreshControls() {
         systemSlider.doubleValue = config.systemInterval
         quotaSlider.doubleValue = config.quotaInterval
         cpuCheckbox.state = config.showCPU ? .on : .off
         memoryCheckbox.state = config.showMemory ? .on : .off
+        alertsCheckbox.state = config.alertsEnabled ? .on : .off
+        thresholdSlider.doubleValue = config.alertQuotaThreshold
+        leadSlider.doubleValue = config.alertResetLeadMinutes
+        streakSlider.doubleValue = config.alertFailureStreak
         updateLabels()
     }
 
     private func updateLabels() {
-        let seconds = Int(systemSlider.doubleValue.rounded())
-        systemLabel.stringValue = "系统指标 \(seconds) 秒"
-        let quotaSeconds = Int(quotaSlider.doubleValue.rounded())
-        // 额度间隔跨度大，用人话读出来比秒数好懂
-        quotaLabel.stringValue = "额度刷新 " + Self.humanInterval(quotaSeconds)
+        systemLabel.stringValue = "系统指标 \(Int(systemSlider.doubleValue.rounded())) 秒"
+        quotaLabel.stringValue = "额度刷新 " + Self.humanInterval(Int(quotaSlider.doubleValue.rounded()))
+        thresholdLabel.stringValue = "额度剩余低于 \(Int(thresholdSlider.doubleValue.rounded()))%"
+        leadLabel.stringValue = "重置前 \(Int(leadSlider.doubleValue.rounded())) 分钟内"
+        streakLabel.stringValue = "连续失败 \(Int(streakSlider.doubleValue.rounded())) 次"
+        // 预警关掉时三个阈值滑杆没有意义，置灰而不是隐藏——
+        // 隐藏会让用户以为这个功能不存在
+        let on = config.alertsEnabled
+        for slider in [thresholdSlider, leadSlider, streakSlider] { slider.isEnabled = on }
+        for label in [thresholdLabel, leadLabel, streakLabel] {
+            label.textColor = on ? .labelColor : .disabledControlTextColor
+        }
     }
 
     private static func humanInterval(_ seconds: Int) -> String {
@@ -199,8 +350,14 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         updateLabels()
         if sender === systemSlider {
             config.setSystemInterval(sender.doubleValue.rounded())
-        } else {
+        } else if sender === quotaSlider {
             config.setQuotaInterval(sender.doubleValue.rounded())
+        } else if sender === thresholdSlider {
+            config.setAlertThreshold(sender.doubleValue.rounded())
+        } else if sender === leadSlider {
+            config.setAlertLead(sender.doubleValue.rounded())
+        } else {
+            config.setAlertStreak(sender.doubleValue.rounded())
         }
         onChange(config)
     }
@@ -208,9 +365,12 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     @objc private func checkboxChanged(_ sender: NSButton) {
         if sender === cpuCheckbox {
             config.setShowCPU(sender.state == .on)
-        } else {
+        } else if sender === memoryCheckbox {
             config.setShowMemory(sender.state == .on)
+        } else {
+            config.setAlertsEnabled(sender.state == .on)
         }
+        updateLabels()
         onChange(config)
     }
 
@@ -222,6 +382,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     func show() {
         refreshControls()   // 每次打开都用当前生效值刷新，避免显示陈旧状态
+        resizeWindow()
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

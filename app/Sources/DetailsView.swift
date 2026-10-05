@@ -119,27 +119,6 @@ final class MeterRowView: NSView {
 // MARK: - 详情窗口主体
 
 final class DetailsView: NSView {
-    /// 由服务返回的窗口长度推导标题，不硬编码「五小时」「每周」——
-    /// 窗口长度以后端为准（见 docs/codex-dock-feasibility.md §数据来源）。
-    static func windowTitle(minutes: Int?) -> String {
-        guard let minutes, minutes > 0 else { return "额度窗口" }
-        for (unit, size) in [("周", 10_080), ("天", 1_440), ("小时", 60)] {
-            if minutes % size == 0 { return "\(minutes / size) \(unit)窗口" }
-        }
-        return "\(minutes) 分钟窗口"
-    }
-
-    /// 重置倒计时。文案避免「0 分后」这类难读输出。
-    static func countdown(to date: Date, now: Date = Date()) -> String {
-        let minutes = Int(ceil(date.timeIntervalSince(now) / 60))
-        if minutes <= 0 { return "已到期" }
-        let (hours, rest) = (minutes / 60, minutes % 60)
-        let (days, restHours) = (hours / 24, hours % 24)
-        if days > 0 { return restHours > 0 ? "\(days) 天 \(restHours) 小时后" : "\(days) 天后" }
-        if hours > 0 { return rest > 0 ? "\(hours) 小时 \(rest) 分后" : "\(hours) 小时后" }
-        return "\(minutes) 分后"
-    }
-
     private enum Gap {
         static let afterHeader: CGFloat = 12
         static let betweenQuota: CGFloat = 16

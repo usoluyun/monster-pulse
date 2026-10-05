@@ -53,12 +53,12 @@ func verify() throws {
     }
     for (minutes, expected) in [(300, "5 小时窗口"), (10080, "1 周窗口"), (1440, "1 天窗口"),
                                (20160, "2 周窗口"), (120, "2 小时窗口"), (100, "100 分钟窗口")] {
-        expect(DetailsView.windowTitle(minutes: minutes), expected, "windowTitle(\(minutes))")
+        expect(QuotaFormat.windowTitle(minutes: minutes), expected, "windowTitle(\(minutes))")
     }
     // 90 分钟不是整小时，不能塌缩成「1 小时窗口」——窗口长度以服务返回为准
-    expect(DetailsView.windowTitle(minutes: 90), "90 分钟窗口", "windowTitle(90) 非整小时")
+    expect(QuotaFormat.windowTitle(minutes: 90), "90 分钟窗口", "windowTitle(90) 非整小时")
     for missing in [nil, 0, -5] as [Int?] {
-        expect(DetailsView.windowTitle(minutes: missing), "额度窗口", "windowTitle(\(String(describing: missing)))")
+        expect(QuotaFormat.windowTitle(minutes: missing), "额度窗口", "windowTitle(\(String(describing: missing)))")
     }
 
     // 倒计时：已到期、纯分、纯小时、天+小时；整小时不能退化成「60 分后」
@@ -67,7 +67,7 @@ func verify() throws {
                                (60.0 * 30, "30 分后"), (3600.0 * 3, "3 小时后"),
                                (3600.0 * 3 + 60.0 * 12, "3 小时 12 分后"),
                                (86400.0 * 5, "5 天后"), (86400.0 * 2 + 3600.0 * 6, "2 天 6 小时后")] {
-        expect(DetailsView.countdown(to: now.addingTimeInterval(offset), now: now),
+        expect(QuotaFormat.countdown(to: now.addingTimeInterval(offset), now: now),
                expected, "countdown(+\(Int(offset))s)")
     }
 
@@ -160,11 +160,112 @@ func verify() throws {
         defaults.removeObject(forKey: "quotaRefreshInterval")
     }
 
+    // 额度预警。三条规则 + 跃迁去重都要覆盖，去重是这里最容易写错的地方：
+    // 条件持续成立时不能反复触发，否则 120 秒轮询会把 Dock 一直打得跳。
+    let alertNow = Date(timeIntervalSince1970: 1_767_225_600)
+    let alertConfig = Config.default
+    func alertWindows(remaining: Int, resetIn: TimeInterval?) -> [AlertMonitor.Window] {
+        [AlertMonitor.Window(minutes: 300, remaining: remaining,
+                             resetsAt: resetIn.map { alertNow.addingTimeInterval($0) })]
+    }
+    func keys(_ set: Set<String>) -> Set<String> { set }
+    func expectAlerts(_ actual: Set<String>, _ expected: Set<String>, _ label: String) {
+        if actual != expected {
+            let missing = expected.subtracting(actual).sorted().joined(separator: ",")
+            let extra = actual.subtracting(expected).sorted().joined(separator: ",")
+            failures.append("\(label)：缺[\(missing)] 多[\(extra)]")
+        }
+    }
+
+    // 额度充足、无重置临近、无失败 → 无预警
+    expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 92, resetIn: 3600 * 3),
+                                               failureStreak: 0, config: alertConfig, now: alertNow)),
+                 [], "正常状态不应有预警")
+    // 剩余 15% 低于默认阈值 20% → 触发；20% 恰好等于阈值不算越线（阈值向上取整）
+    expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 15, resetIn: 3600 * 3),
+                                               failureStreak: 0, config: alertConfig, now: alertNow)),
+                 ["low-quota"], "剩余 15% 应触发额度预警")
+    expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 20, resetIn: 3600 * 3),
+                                               failureStreak: 0, config: alertConfig, now: alertNow)),
+                 [], "剩余 20% 等于阈值不应触发")
+    // 重置临近：默认提前 30 分钟
+    expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 92, resetIn: 60 * 20),
+                                               failureStreak: 0, config: alertConfig, now: alertNow)),
+                 ["reset-soon-0"], "20 分钟后重置应触发")
+    expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 92, resetIn: 60 * 40),
+                                               failureStreak: 0, config: alertConfig, now: alertNow)),
+                 [], "40 分钟后重置不应触发")
+    // 连续失败默认 3 次：2 次不报、3 次才报
+    expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 92, resetIn: 3600 * 3),
+                                               failureStreak: 2, config: alertConfig, now: alertNow)),
+                 [], "连续失败 2 次不应触发")
+    expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 92, resetIn: 3600 * 3),
+                                               failureStreak: 3, config: alertConfig, now: alertNow)),
+                 ["query-failed"], "连续失败 3 次应触发")
+    // 关闭预警后一律不触发
+    var muted = Config.default; muted.setAlertsEnabled(false)
+    expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 1, resetIn: 60),
+                                               failureStreak: 99, config: muted, now: alertNow)),
+                 [], "关闭预警后不应有任何预警")
+
+    // 跃迁去重：同一条件持续成立只触发一次，条件消失后再次成立才重新触发。
+    let tracker = AlertMonitor.Tracker()
+    let low = alertWindows(remaining: 15, resetIn: 3600 * 3)
+    let normal = alertWindows(remaining: 92, resetIn: 3600 * 3)
+    let firstFire = tracker.update(windows: low, failureStreak: 0, config: alertConfig, now: alertNow)
+    if firstFire.map(\.key) != ["low-quota"] {
+        failures.append("Tracker 首次越线应产生 low-quota，得到 \(firstFire.map(\.key))")
+    }
+    for round in 1...5 {
+        let repeatFire = tracker.update(windows: low, failureStreak: 0, config: alertConfig,
+                                        now: alertNow.addingTimeInterval(TimeInterval(round * 120)))
+        if !repeatFire.isEmpty {
+            failures.append("Tracker 在条件持续成立时第 \(round) 轮重复触发了 \(repeatFire.map(\.key))")
+            break
+        }
+    }
+    // 条件消失后清空，再次越线应重新触发
+    _ = tracker.update(windows: normal, failureStreak: 0, config: alertConfig,
+                       now: alertNow.addingTimeInterval(720))
+    let reFire = tracker.update(windows: low, failureStreak: 0, config: alertConfig,
+                               now: alertNow.addingTimeInterval(840))
+    if reFire.map(\.key) != ["low-quota"] {
+        failures.append("Tracker 在条件消失后再次越线应重新触发，得到 \(reFire.map(\.key))")
+    }
+    // suppress()：关掉再打开预警时，条件通常还成立着，不应立刻再弹一次。
+    // 这与 reset() 语义相反——reset() 清空记录，下次会把当前条件当成新跃迁。
+    tracker.reset()
+    let reFireAfterReset = tracker.update(windows: low, failureStreak: 0, config: alertConfig,
+                                          now: alertNow.addingTimeInterval(960))
+    if reFireAfterReset.map(\.key) != ["low-quota"] {
+        failures.append("Tracker.reset() 后应把当前条件当作新跃迁，得到 \(reFireAfterReset.map(\.key))")
+    }
+    tracker.suppress(windows: low, failureStreak: 0, config: alertConfig, now: alertNow)
+    let afterSuppress = tracker.update(windows: low, failureStreak: 0, config: alertConfig,
+                                       now: alertNow.addingTimeInterval(1080))
+    if !afterSuppress.isEmpty {
+        failures.append("Tracker.suppress() 后不应立即触发，得到 \(afterSuppress.map(\.key))")
+    }
+    // suppress 之后条件再次成立仍要能触发（说明 suppress 没有把记录写死）
+    _ = tracker.update(windows: normal, failureStreak: 0, config: alertConfig,
+                       now: alertNow.addingTimeInterval(1200))
+    let afterSuppressRefire = tracker.update(windows: low, failureStreak: 0, config: alertConfig,
+                                             now: alertNow.addingTimeInterval(1320))
+    if afterSuppressRefire.map(\.key) != ["low-quota"] {
+        failures.append("suppress 后条件再次越线应重新触发，得到 \(afterSuppressRefire.map(\.key))")
+    }
+    // 预警文案必须带上真实数值，便于排障
+    let sampleAlert = AlertMonitor.message(for: "low-quota", windows: low, failureStreak: 0,
+                                          config: alertConfig, now: alertNow)
+    if !sampleAlert.body.contains("15") || !sampleAlert.body.contains("20") {
+        failures.append("low-quota 文案应含剩余 15% 与阈值 20%，得到「\(sampleAlert.body)」")
+    }
+
     if !failures.isEmpty {
         for line in failures { fputs("FAIL  \(line)\n", stderr) }
         throw ReadError.message("自检失败 \(failures.count) 项")
     }
-    print("PASS: quota parsing, missing/invalid/other buckets, CPU and memory sampling, window title and countdown formatting, dock menu structure, config clamping")
+    print("PASS: quota parsing, missing/invalid/other buckets, CPU and memory sampling, window title and countdown formatting, dock menu structure, config clamping, quota alerts")
 }
 
 if CommandLine.arguments.contains("--self-test") {
@@ -293,10 +394,10 @@ if CommandLine.arguments.contains("--details-render-test") {
     // 改成永远不出分钟、视觉回归仍然 10/10 全过，回归对这段逻辑是盲的。
     // 改成传固定时间戳后，同一处改动会被 details-normal 判 FAIL。
     let windows: [(title: String, used: Int, remaining: Int, reset: String?)] = [
-        (DetailsView.windowTitle(minutes: 300), 8, 92,
-         DetailsView.countdown(to: now.addingTimeInterval(3 * 3600 + 12 * 60), now: now)),
-        (DetailsView.windowTitle(minutes: 10080), 10, 90,
-         DetailsView.countdown(to: now.addingTimeInterval(5 * 86400 + 15 * 3600), now: now)),
+        (QuotaFormat.windowTitle(minutes: 300), 8, 92,
+         QuotaFormat.countdown(to: now.addingTimeInterval(3 * 3600 + 12 * 60), now: now)),
+        (QuotaFormat.windowTitle(minutes: 10080), 10, 90,
+         QuotaFormat.countdown(to: now.addingTimeInterval(5 * 86400 + 15 * 3600), now: now)),
     ]
     // 配置关掉的指标要能在渲染里体现，否则视觉回归覆盖不到这条分支
     let showCPU = !state.hasSuffix("-no-meters")
@@ -441,6 +542,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let details = DetailsView()
     var config = Config.default
     var settings: SettingsWindowController!
+    /// 额度预警的跃迁检测器。只在条件跨入时触发一次，避免每 120 秒轮询都提醒。
+    let alertTracker = AlertMonitor.Tracker()
+    /// 连续查询失败次数。成功一次即清零——「连续」的含义就是不能被中间的成功打断。
+    var failureStreak = 0
     var quota: Quota?
     var updated: Date?
     var errorText: String?
@@ -498,6 +603,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func configChanged() {
         startTimers()
         render()
+        evaluateAlerts(afterConfigChange: true)
+    }
+
+    /// 判定并发出额度预警。数据每次查询完成后调用一次。
+    ///
+    /// 提醒方式是 Dock 图标跳动（`requestUserAttention`）：不需要通知授权、
+    /// 不受 ad-hoc 签名限制，实测可用。为什么不用系统横幅通知见 Alerts.swift 顶部说明。
+    ///
+    /// 每次只对「新跨入」的预警叫一次，跳动本身由系统决定节奏；
+    /// 文案不直接展示（系统横幅才有文案），所以 Alert 的 title/body 仅用于
+    /// 日志与测试断言——这里如实说明，不假装用户能看到文字。
+    ///
+    /// - Parameter afterConfigChange: 用户刚改过预警配置。此时若是「打开」状态，
+    ///   先把当前条件记为已知再判定，否则条件通常还成立着，一开设置就会弹一次。
+    func evaluateAlerts(afterConfigChange: Bool = false) {
+        guard config.alertsEnabled else { return }
+        let windows = (quota?.windows ?? []).map {
+            AlertMonitor.Window(minutes: $0.minutes, remaining: $0.remaining, resetsAt: $0.resetsAt)
+        }
+        if afterConfigChange { alertTracker.suppress(windows: windows, failureStreak: failureStreak, config: config) }
+        let alerts = alertTracker.update(windows: windows, failureStreak: failureStreak, config: config)
+        guard !alerts.isEmpty else { return }
+        for alert in alerts {
+            FileHandle.standardError.write(
+                "ALERT [\(alert.key)] \(alert.title)：\(alert.body)\n".data(using: .utf8)!)
+        }
+        // 一次只请求一次跳动：多条预警同时出现时，连续跳动没有额外信息量
+        NSApp.requestUserAttention(.informationalRequest)
     }
     func tick() {
         guard !sleeping else { return }
@@ -515,10 +648,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }; self.loading = false
                 switch result {
-                case .success(let value): self.quota = value; self.updated = Date(); self.errorText = nil
-                case .failure(let error): self.errorText = error.localizedDescription
+                case .success(let value):
+                    self.quota = value; self.updated = Date(); self.errorText = nil
+                    self.failureStreak = 0
+                case .failure(let error):
+                    self.errorText = error.localizedDescription
+                    self.failureStreak += 1
                 }
                 self.render()
+                self.evaluateAlerts()
             }
         }
         queue.addOperation(operation)
@@ -534,10 +672,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if dockState != lastDockState { NSApp.dockTile.display(); lastDockState = dockState }
         details.update(
             windows: (quota?.windows ?? []).map { value in
-                (title: DetailsView.windowTitle(minutes: value.minutes),
+                (title: QuotaFormat.windowTitle(minutes: value.minutes),
                  used: Int(value.used.rounded()),
                  remaining: value.remaining,
-                 reset: value.resetsAt.map { DetailsView.countdown(to: $0) })
+                 reset: value.resetsAt.map { QuotaFormat.countdown(to: $0) })
             },
             quotaAvailable: quota != nil,
             cpu: config.showCPU ? dock.cpu : nil,
@@ -605,8 +743,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 状态区：与详情窗口共用同一套取数和文案格式化
         if let quota, !quota.windows.isEmpty {
             for value in quota.windows {
-                menu.addItem(info("\(DetailsView.windowTitle(minutes: value.minutes))　剩余 \(value.remaining)%"))
-                if let reset = value.resetsAt.map({ DetailsView.countdown(to: $0, now: now) }) {
+                menu.addItem(info("\(QuotaFormat.windowTitle(minutes: value.minutes))　剩余 \(value.remaining)%"))
+                if let reset = value.resetsAt.map({ QuotaFormat.countdown(to: $0, now: now) }) {
                     menu.addItem(info("　重置 \(reset)"))
                 }
             }
