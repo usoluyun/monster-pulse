@@ -14,10 +14,30 @@ func verify() throws {
         do { _ = try Quota.parse(invalid); throw ReadError.message("Invalid quota accepted") }
         catch ReadError.message(let value) { precondition(value != "Invalid quota accepted") }
     }
+    // 系统采样。CPU 忙碌率是「相邻两次采样的 tick 差值」，所以必须等计数器
+    // 真的走格才有值。
+    //
+    // 关键事实（实测，Apple Silicon 12 核）：host_statistics 返回的 CPU tick
+    // 计数器约每 1 秒才更新一次。零增量比例：间隔 10ms 为 13/15、50ms 为
+    // 11/15、200ms 为 6/15、1000ms 为 0/15。也就是说任何短于 1 秒的采样都
+    // 很可能读到完全相同的快照。
+    //
+    // 原实现固定等 100µs，因此几乎必然取不到值——之前一直 PASS 只是因为
+    // 每次都在编译之后跑，进程启动与编译的残留活动让快照恰好跨过了刷新点。
+    // 改成轮询到计数器变化为止，不依赖这种偶然。
+    //
+    // 注意这条约束同样限制了产品侧：任何想要亚秒级 CPU 读数的功能（例如低帧率
+    // 动效按忙碌率调速）都拿不到有意义的数据，详见 docs/codex-dock-verification.md
+    // 后续补充。
     let sampler = SystemSampler()
     _ = sampler.sample()
-    usleep(100_000)
-    let system = sampler.sample()
+    var system = sampler.sample()
+    var waited: UInt32 = 0
+    let step: UInt32 = 50_000
+    while system.cpu == nil && waited < 3_000_000 {
+        usleep(step); waited += step
+        system = sampler.sample()
+    }
     guard let cpu = system.cpu, let memory = system.memory,
           (0...1).contains(cpu), (0...1).contains(memory) else { throw ReadError.message("系统采样失败") }
 
@@ -106,11 +126,45 @@ func verify() throws {
         failures.append("无数据状态不应出现「\(bogus)」")
     }
 
+    // Config 的越界夹取与持久化。直接往 UserDefaults 写脏值再 load()，
+    // 验证「配置文件被手改或来自旧版本」时不会让定时器行为失控。
+    let defaults = UserDefaults.standard
+    let domain = Bundle.main.bundleIdentifier ?? "local.monsterpulse.selftest"
+    func withConfigDomain<T>(_ body: () -> T) -> T {
+        defaults.removePersistentDomain(forName: domain)
+        // register 的注册域挂在 app 域上，这里直接改写同一批 key
+        return body()
+    }
+    withConfigDomain {
+        defaults.set(0.0, forKey: "systemSampleInterval")       // 越下界
+        defaults.set(9999.0, forKey: "quotaRefreshInterval")    // 越上界
+        defaults.set(Double.nan, forKey: "systemSampleInterval")
+        let clamped = Config.load()
+        if clamped.systemInterval != Config.defaultSystemInterval {
+            failures.append("Config.load 越界 systemInterval 应回退默认，得到 \(clamped.systemInterval)")
+        }
+        if clamped.quotaInterval != Config.defaultQuotaInterval {
+            failures.append("Config.load 越界 quotaInterval 应回退默认，得到 \(clamped.quotaInterval)")
+        }
+        // 合法区间内的值必须被保留，不能被误夹
+        defaults.set(7.0, forKey: "systemSampleInterval")
+        defaults.set(45.0, forKey: "quotaRefreshInterval")
+        let kept = Config.load()
+        if kept.systemInterval != 7.0 || kept.quotaInterval != 45.0 {
+            failures.append("Config.load 未保留合法值，得到 \(kept.systemInterval)/\(kept.quotaInterval)")
+        }
+        // 容差应随间隔缩放，且不低于 1 秒
+        if kept.systemTolerance < 1 { failures.append("systemTolerance 不得小于 1 秒") }
+        if kept.quotaTolerance < 1 { failures.append("quotaTolerance 不得小于 1 秒") }
+        defaults.removeObject(forKey: "systemSampleInterval")
+        defaults.removeObject(forKey: "quotaRefreshInterval")
+    }
+
     if !failures.isEmpty {
         for line in failures { fputs("FAIL  \(line)\n", stderr) }
         throw ReadError.message("自检失败 \(failures.count) 项")
     }
-    print("PASS: quota parsing, missing/invalid/other buckets, CPU and memory sampling, window title and countdown formatting, dock menu structure")
+    print("PASS: quota parsing, missing/invalid/other buckets, CPU and memory sampling, window title and countdown formatting, dock menu structure, config clamping")
 }
 
 if CommandLine.arguments.contains("--self-test") {
@@ -160,6 +214,13 @@ if CommandLine.arguments.contains("--render-test") {
     view.cpu = args.count > 2 ? Double(args[2]) : 0.42
     view.memory = args.count > 3 ? Double(args[3]) : 0.61
     view.stale = args.count > 4 ? args[4] == "stale" : false
+    // 第 6 个参数可选，控制 CPU/内存条的显示，用于覆盖配置关掉指标后的图标外观。
+    // 取值 both / no-cpu / no-mem / no-both。
+    if args.count > 5 {
+        let meters = args[5]
+        view.showCPU = meters != "no-cpu" && meters != "no-both"
+        view.showMemory = meters != "no-mem" && meters != "no-both"
+    }
     let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
     view.cacheDisplay(in: view.bounds, to: bitmap)
     try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
@@ -237,22 +298,30 @@ if CommandLine.arguments.contains("--details-render-test") {
         (DetailsView.windowTitle(minutes: 10080), 10, 90,
          DetailsView.countdown(to: now.addingTimeInterval(5 * 86400 + 15 * 3600), now: now)),
     ]
+    // 配置关掉的指标要能在渲染里体现，否则视觉回归覆盖不到这条分支
+    let showCPU = !state.hasSuffix("-no-meters")
+    let showMemory = showCPU
     switch state {
-    case "no-data":
+    case "no-data", "no-data-no-meters":
         details.update(windows: [], quotaAvailable: false, cpu: nil, memory: nil,
+                       showCPU: showCPU, showMemory: showMemory,
                        updated: nil, loading: false, errorText: nil, stale: false)
     case "stale":
         details.update(windows: windows, quotaAvailable: true, cpu: 0.42, memory: 0.61,
+                       showCPU: showCPU, showMemory: showMemory,
                        updated: now.addingTimeInterval(-600), loading: false, errorText: nil, stale: true)
     case "error":
         details.update(windows: [], quotaAvailable: false, cpu: 0.42, memory: 0.61,
+                       showCPU: showCPU, showMemory: showMemory,
                        updated: nil, loading: false,
                        errorText: "Codex 查询超时或进程退出；请检查 CLI 登录状态和网络", stale: true)
     case "loading":
         details.update(windows: windows, quotaAvailable: true, cpu: 0.42, memory: 0.61,
+                       showCPU: showCPU, showMemory: showMemory,
                        updated: now, loading: true, errorText: nil, stale: false)
     default:
         details.update(windows: windows, quotaAvailable: true, cpu: 0.42, memory: 0.61,
+                       showCPU: showCPU, showMemory: showMemory,
                        updated: now, loading: false, errorText: nil, stale: false)
     }
 
@@ -285,6 +354,8 @@ final class DockView: NSView {
     var cpu: Double?
     var memory: Double?
     var stale = false
+    var showCPU = true
+    var showMemory = true
 
     // Dock 图标走 dockTile 离屏渲染，没有 GPU 合成可借力，每次 display 都要 CPU 重画。
     // 静态部分（背景、进度条底槽）与数字文字的排版是主要开销——后者每次都要重跑
@@ -343,11 +414,17 @@ final class DockView: NSView {
         drawGlyph(remaining.map { "\($0)%" } ?? "—", at: 48, size: 32,
                   color: stale ? .systemOrange : .white)
 
-        // 进度条填充随 cpu/memory 每 5 秒变，形状简单，保持实时绘制
-        for (index, value) in [cpu, memory].enumerated() {
-            guard let value else { continue }
-            let rect = NSRect(x: 19, y: 32 - index * 13, width: 90, height: 7)
-            (index == 0 ? NSColor.systemTeal : NSColor.systemPurple).setFill()
+        // 进度条填充随 cpu/memory 每 5 秒变，形状简单，保持实时绘制。
+        // 每个指标占固定槽位（CPU 上、内存下），关闭某项时另一项不移动，
+        // 避免用户切开关时图标里另一根条跳位。
+        let meters: [(value: Double?, shown: Bool, slot: Int, color: NSColor)] = [
+            (cpu, showCPU, 0, .systemTeal),
+            (memory, showMemory, 1, .systemPurple),
+        ]
+        for meter in meters {
+            guard meter.shown, let value = meter.value else { continue }
+            let rect = NSRect(x: 19, y: 32 - meter.slot * 13, width: 90, height: 7)
+            meter.color.setFill()
             NSBezierPath(roundedRect: NSRect(x: rect.minX, y: rect.minY,
                 width: rect.width * value, height: 7), xRadius: 3, yRadius: 3).fill()
         }
@@ -362,6 +439,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var observers: [NSObjectProtocol] = []
     var window: NSWindow!
     let details = DetailsView()
+    var config = Config.default
+    var settings: SettingsWindowController!
     var quota: Quota?
     var updated: Date?
     var errorText: String?
@@ -371,8 +450,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         queue.maxConcurrentOperationCount = 1
+        // 注册域是易失的，每次启动都要重注册，再叠加用户已存的持久值
+        Config.registerDefaults()
+        config = Config.load()
         NSApp.setActivationPolicy(.regular)
         let menu = NSMenu(), appItem = NSMenuItem(), submenu = NSMenu()
+        submenu.addItem(withTitle: "设置…", action: #selector(openSettings), keyEquivalent: ",")
+        submenu.addItem(.separator())
         submenu.addItem(withTitle: "退出 Monster Pulse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = submenu; menu.addItem(appItem); NSApp.mainMenu = menu
         NSApp.dockTile.contentView = dock
@@ -392,21 +476,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }; self.sleeping = false; self.sampler.reset(); self.startTimers(); self.tick(); self.refresh()
         })
         startTimers(); tick(); refresh()
+        settings = SettingsWindowController(config: config) { [weak self] updated in
+            self?.config = updated
+            self?.configChanged()
+        }
         window.center(); window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
     func startTimers() {
         timers.forEach { $0.invalidate() }
-        let system = Timer(timeInterval: 5, repeats: true) { [weak self] _ in self?.tick() }
-        system.tolerance = 1
-        let codex = Timer(timeInterval: 120, repeats: true) { [weak self] _ in self?.refresh() }
-        codex.tolerance = 15
+        let system = Timer(timeInterval: config.systemInterval, repeats: true) { [weak self] _ in self?.tick() }
+        system.tolerance = config.systemTolerance
+        let codex = Timer(timeInterval: config.quotaInterval, repeats: true) { [weak self] _ in self?.refresh() }
+        codex.tolerance = config.quotaTolerance
         timers = [system, codex]
         timers.forEach { RunLoop.main.add($0, forMode: .common) }
+    }
+
+    /// 配置变更后的统一处理：重启定时器让新间隔立即生效，
+    /// 并刷新展示（CPU/内存可能被隐藏）。
+    func configChanged() {
+        startTimers()
+        render()
     }
     func tick() {
         guard !sleeping else { return }
         let data = sampler.sample(); dock.cpu = data.cpu; dock.memory = data.memory; render()
+    }
+    @objc func openSettings() {
+        settings.show()
     }
     @objc func refresh() {
         guard !loading && !sleeping else { return }
@@ -428,7 +526,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func render() {
         dock.remaining = quota?.windows.first?.remaining
         dock.stale = errorText != nil || (updated.map { Date().timeIntervalSince($0) > 300 } ?? false)
-        let dockState = "\(dock.remaining ?? -1):\(dock.stale):\(Int((dock.cpu ?? -1) * 100)):\(Int((dock.memory ?? -1) * 100))"
+        dock.showCPU = config.showCPU
+        dock.showMemory = config.showMemory
+        // 开关必须计入状态串：否则用户关掉 CPU 后图标内容变了却不会重绘
+        let dockState = "\(dock.remaining ?? -1):\(dock.stale):\(config.showCPU):\(config.showMemory):"
+            + "\(Int((dock.cpu ?? -1) * 100)):\(Int((dock.memory ?? -1) * 100))"
         if dockState != lastDockState { NSApp.dockTile.display(); lastDockState = dockState }
         details.update(
             windows: (quota?.windows ?? []).map { value in
@@ -438,7 +540,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                  reset: value.resetsAt.map { DetailsView.countdown(to: $0) })
             },
             quotaAvailable: quota != nil,
-            cpu: dock.cpu, memory: dock.memory,
+            cpu: config.showCPU ? dock.cpu : nil,
+            memory: config.showMemory ? dock.memory : nil,
+            showCPU: config.showCPU, showMemory: config.showMemory,
             updated: updated, loading: loading, errorText: errorText, stale: dock.stale)
         fitWindow()
     }
@@ -460,7 +564,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Dock 菜单（右键 Dock 图标）
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         Self.buildDockMenu(target: self, quota: quota, stale: dock.stale,
-                           loading: loading, errorText: errorText, cpu: dock.cpu, memory: dock.memory)
+                           loading: loading, errorText: errorText,
+                           cpu: dock.cpu, memory: dock.memory,
+                           showCPU: config.showCPU, showMemory: config.showMemory)
     }
 
     /// 构造 Dock 菜单。抽成不依赖 `NSApplication` 实例的静态函数，
@@ -469,6 +575,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 是可以断言的。
     static func buildDockMenu(target: AnyObject, quota: Quota?, stale: Bool, loading: Bool,
                               errorText: String?, cpu: Double?, memory: Double?,
+                              showCPU: Bool = true, showMemory: Bool = true,
                               now: Date = Date()) -> NSMenu {
         // 两个来自官方文档的硬约束，不照做菜单就不工作：
         // 1. Dock 菜单的 target/action 不由系统代为分发，文档要求选中项后
@@ -510,14 +617,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let errorText { menu.addItem(info(errorText)) }
         }
         menu.addItem(.separator())
-        menu.addItem(info("CPU　\(cpu.map { String(format: "%.0f%%", $0 * 100) } ?? "采样中")"))
-        menu.addItem(info("内存　\(memory.map { String(format: "%.0f%%", $0 * 100) } ?? "不可用")"))
+        // 与图标和详情窗口保持一致：配置关掉的指标不出现在菜单里
+        if showCPU {
+            menu.addItem(info("CPU　\(cpu.map { String(format: "%.0f%%", $0 * 100) } ?? "采样中")"))
+        }
+        if showMemory {
+            menu.addItem(info("内存　\(memory.map { String(format: "%.0f%%", $0 * 100) } ?? "不可用")"))
+        }
         menu.addItem(.separator())
         // 查询进行中禁用刷新，而不是让点了没反应——对应 refresh() 里的
         // !loading 守卫，把「不会叠加正在执行的查询」如实暴露给用户
         menu.addItem(action(loading ? "正在查询…" : "立即刷新额度",
                             #selector(AppDelegate.dockMenuRefresh), enabled: !loading))
         menu.addItem(action("打开详情", #selector(AppDelegate.dockMenuShowDetails)))
+        menu.addItem(action("设置…", #selector(AppDelegate.dockMenuSettings)))
         menu.addItem(.separator())
         menu.addItem(action("退出 Monster Pulse", #selector(AppDelegate.dockMenuQuit)))
         return menu
@@ -537,6 +650,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc private func dockMenuQuit(_ sender: Any?) {
         NSApp.terminate(nil)
+    }
+    @objc private func dockMenuSettings(_ sender: Any?) {
+        NSApp.sendAction(#selector(openSettings), to: self, from: nil)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationWillTerminate(_ notification: Notification) {

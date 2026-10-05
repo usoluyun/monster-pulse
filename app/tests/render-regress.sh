@@ -21,12 +21,18 @@ TOL="${TOL:-24}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# 规格固定 6 段：名称:额度:CPU:内存:stale:meters
+# 段数必须固定，否则 IFS=':' read 会因空段吞掉后面的字段（实测踩过）。
+# meters 取值 both / no-cpu / no-mem / no-both，用于覆盖配置关掉指标后的图标外观。
 CASES=(
-  "normal-92:92:0.42:0.61"
-  "low-cpu-45:45:0.08:0.77"
-  "full-100:100:1.0:1.0"
-  "stale:88:0.42:0.61:stale"
-  "no-data:92:0:0"
+  "normal-92:92:0.42:0.61:none:both"
+  "low-cpu-45:45:0.08:0.77:none:both"
+  "full-100:100:1.0:1.0:none:both"
+  "stale:88:0.42:0.61:stale:both"
+  "no-data:92:0:0:none:both"
+  "hide-cpu:92:0.42:0.61:none:no-cpu"
+  "hide-mem:92:0.42:0.61:none:no-mem"
+  "hide-both:92:0.42:0.61:none:no-both"
 )
 
 # 详情窗口的用例。规格只有状态名，由应用内部决定该状态的数据，
@@ -38,15 +44,16 @@ DETAILS_CASES=(
   "details-stale"
   "details-error"
   "details-loading"
+  "details-normal-no-meters"
+  "details-no-data-no-meters"
 )
 
 mkdir -p "$BASE"
 if [ "${1:-}" = "--update" ]; then
   for spec in "${CASES[@]}"; do
-    IFS=':' read -r name r c m extra <<<"$spec"
-    args=(--render-test "$BASE/$name.png" "$r" "$c" "$m")
-    [ -n "${extra:-}" ] && args+=("$extra")
-    "$APP" "${args[@]}" >/dev/null && echo "  基线已更新 $name"
+    IFS=':' read -r name r c m st meters <<<"$spec"
+    "$APP" --render-test "$BASE/$name.png" "$r" "$c" "$m" "$st" "$meters" >/dev/null \
+      && echo "  基线已更新 $name"
   done
   for state in "${DETAILS_CASES[@]}"; do
     "$APP" --details-render-test "$BASE/$state.png" "${state#details-}" >/dev/null \
@@ -78,10 +85,8 @@ compare() {   # compare <名称> <渲染出的文件>
 
 echo "Dock 图标视觉回归（容差 ${TOL}）"
 for spec in "${CASES[@]}"; do
-  IFS=':' read -r name r c m extra <<<"$spec"
-  args=(--render-test "$WORK/$name.png" "$r" "$c" "$m")
-  [ -n "${extra:-}" ] && args+=("$extra")
-  "$APP" "${args[@]}" >/dev/null
+  IFS=':' read -r name r c m st meters <<<"$spec"
+  "$APP" --render-test "$WORK/$name.png" "$r" "$c" "$m" "$st" "$meters" >/dev/null
   compare "$name" "$WORK/$name.png"
 done
 

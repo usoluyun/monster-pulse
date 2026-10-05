@@ -179,6 +179,7 @@ final class DetailsView: NSView {
     /// 结构化数据入口。AppDelegate 只负责取数与判断 stale，视图不含任何业务规则。
     func update(windows: [(title: String, used: Int, remaining: Int, reset: String?)],
                 quotaAvailable: Bool, cpu: Double?, memory: Double?,
+                showCPU: Bool, showMemory: Bool,
                 updated: Date?, loading: Bool, errorText: String?, stale: Bool) {
         if quotaRows.count != windows.count {
             quotaRows.forEach { $0.removeFromSuperview() }
@@ -194,15 +195,20 @@ final class DetailsView: NSView {
             row.update(title: item.title, used: item.used, remaining: item.remaining, reset: item.reset)
         }
         empty.isHidden = quotaAvailable
-        cpuRow.update(cpu)
-        memoryRow.update(memory)
+        // 被配置关掉的指标整行隐藏，而不是显示成「—」——关掉就是不想看
+        cpuRow.isHidden = !showCPU
+        memoryRow.isHidden = !showMemory
+        cpuRow.update(showCPU ? cpu : nil)
+        memoryRow.update(showMemory ? memory : nil)
 
-        if let updated {
-            let time = DateFormatter.localizedString(from: updated, dateStyle: .none, timeStyle: .medium)
-            footer.stringValue = "更新 \(time) · 内存为近似占比，非内存压力"
-        } else {
-            footer.stringValue = "尚未获取额度 · 内存为近似占比，非内存压力"
-        }
+        // 内存的近似占比免责声明只在真的显示内存时出现——关掉内存后还提它
+        // 会让用户以为屏幕上还有个内存指标
+        let stamp = updated.map {
+            "更新 " + DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .medium)
+        } ?? "尚未获取额度"
+        var footerParts = [stamp]
+        if showMemory { footerParts.append("内存为近似占比，非内存压力") }
+        footer.stringValue = footerParts.joined(separator: " · ")
 
         // 状态行优先级：错误 > 过期 > 加载中。
         // 「旧数据，仅供参考」只在真的有快照时才说——首次查询就失败时根本
@@ -227,8 +233,14 @@ final class DetailsView: NSView {
             total += CGFloat(quotaRows.count - 1) * Gap.betweenQuota
             total += Gap.beforeDivider + 1 + Gap.afterDivider
         }
-        total += MeterRowView.height * 2 + Gap.betweenMeters
-        total += Gap.beforeFooter + 13
+        // 被隐藏的计量行不占高度，也不出现在其前后的间隔里
+        let meters = [cpuRow, memoryRow].filter { !$0.isHidden }
+        for (index, row) in meters.enumerated() {
+            if index > 0 { total += Gap.betweenMeters }
+            total += MeterRowView.height
+        }
+        if !meters.isEmpty { total += Gap.beforeDivider + 1 + Gap.beforeFooter }
+        total += 13
         if !status.stringValue.isEmpty { total += Gap.beforeStatus + statusSize.height }
         return total
     }
@@ -262,9 +274,11 @@ final class DetailsView: NSView {
             }
             place(dividerOne, 1, gap: Gap.afterDivider)
         }
-        place(cpuRow, MeterRowView.height, gap: Gap.betweenMeters)
-        place(memoryRow, MeterRowView.height, gap: Gap.beforeDivider)
-        place(dividerTwo, 1, gap: Gap.beforeFooter)
+        let meters = [cpuRow, memoryRow].filter { !$0.isHidden }
+        for (index, row) in meters.enumerated() {
+            place(row, MeterRowView.height, gap: index < meters.count - 1 ? Gap.betweenMeters : Gap.beforeDivider)
+        }
+        if !meters.isEmpty { place(dividerTwo, 1, gap: Gap.beforeFooter) }
         place(footer, 13, gap: Gap.beforeStatus)
         if !status.stringValue.isEmpty { place(status, statusSize.height, gap: 0) }
     }
