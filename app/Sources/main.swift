@@ -51,11 +51,66 @@ func verify() throws {
                expected, "countdown(+\(Int(offset))s)")
     }
 
+    // Dock 菜单结构。真实弹出只能在 Dock 上右键，没法注入，所以这里断言的是
+    // 构造结果：状态项禁用、动作项启用且绑定了 target/action、加载中禁用刷新。
+    // 「autoenablesItems 必须为 false」依据官方文档（NSMenuItem.isEnabled 在
+    // autoenablesItems 为真时无效），不是实测结论——无法从 Swift 触发验证路径。
+    let menuNow = Date(timeIntervalSince1970: 1_767_225_600)
+    let demoQuota = Quota(windows: [
+        QuotaWindow(used: 8, minutes: 300, resetsAt: menuNow.addingTimeInterval(3 * 3600 + 12 * 60)),
+        QuotaWindow(used: 10, minutes: 10080, resetsAt: menuNow.addingTimeInterval(5 * 86400 + 15 * 3600)),
+    ])
+    final class MenuTarget: NSObject {}
+    let menuTarget = MenuTarget()
+    defer { _ = menuTarget }
+
+    func checkMenu(_ menu: NSMenu, _ label: String,
+                   enabledTitles: [String], disabledTitles: [String]) {
+        if menu.autoenablesItems { failures.append("\(label)：autoenablesItems 必须为 false") }
+        let enabled = Set(menu.items.filter(\.isEnabled).map(\.title))
+        let disabled = Set(menu.items.filter { !$0.isEnabled && !$0.isSeparatorItem }.map(\.title))
+        for want in enabledTitles where !enabled.contains(want) {
+            failures.append("\(label)：缺少应启用的项「\(want)」")
+        }
+        for want in disabledTitles where !disabled.contains(want) {
+            failures.append("\(label)：缺少应禁用的项「\(want)」")
+        }
+        // 动作项必须真的绑上 target 与 action，否则点了不会有反应
+        for item in menu.items where item.title == "立即刷新额度" {
+            if item.action == nil || item.target == nil {
+                failures.append("\(label)：刷新项缺少 target/action")
+            }
+        }
+    }
+
+    checkMenu(AppDelegate.buildDockMenu(target: menuTarget, quota: demoQuota, stale: false,
+                                        loading: false, errorText: nil, cpu: 0.42, memory: 0.61,
+                                        now: menuNow),
+              "正常状态",
+              enabledTitles: ["立即刷新额度", "打开详情", "退出 Monster Pulse"],
+              disabledTitles: ["5 小时窗口　剩余 92%", "CPU　42%", "内存　61%"])
+    // 查询进行中必须禁用刷新：对应 refresh() 的 !loading 守卫，
+    // 避免用户连点叠加查询
+    checkMenu(AppDelegate.buildDockMenu(target: menuTarget, quota: demoQuota, stale: false,
+                                        loading: true, errorText: nil, cpu: 0.42, memory: 0.61,
+                                        now: menuNow),
+              "加载中",
+              enabledTitles: ["打开详情", "退出 Monster Pulse"],
+              disabledTitles: ["正在查询…"])
+    // 无数据时不能出现「旧数据，仅供参考」——没有快照就说旧数据不成立
+    let noDataTitles = AppDelegate.buildDockMenu(target: menuTarget, quota: nil, stale: true,
+                                                 loading: false, errorText: "查询失败",
+                                                 cpu: nil, memory: nil, now: menuNow)
+        .items.map(\.title)
+    for bogus in ["旧数据，仅供参考", "5 小时窗口　剩余 92%"] where noDataTitles.contains(bogus) {
+        failures.append("无数据状态不应出现「\(bogus)」")
+    }
+
     if !failures.isEmpty {
         for line in failures { fputs("FAIL  \(line)\n", stderr) }
         throw ReadError.message("自检失败 \(failures.count) 项")
     }
-    print("PASS: quota parsing, missing/invalid/other buckets, CPU and memory sampling, window title and countdown formatting")
+    print("PASS: quota parsing, missing/invalid/other buckets, CPU and memory sampling, window title and countdown formatting, dock menu structure")
 }
 
 if CommandLine.arguments.contains("--self-test") {
@@ -109,6 +164,50 @@ if CommandLine.arguments.contains("--render-test") {
     view.cacheDisplay(in: view.bounds, to: bitmap)
     try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
     print("wrote \(out) remaining=\(view.remaining ?? -1) cpu=\(view.cpu ?? -1) memory=\(view.memory ?? -1) stale=\(view.stale)")
+    exit(0)
+}
+if CommandLine.arguments.contains("--dock-menu-dump") {
+    // 把 Dock 菜单结构打成纯文本，供人工排障与自检断言。
+    // 格式：每行 "<enabled|disabled>\t<title>"，分隔项显示为 disabled\t--
+    // 用法: MonsterPulse --dock-menu-dump <normal|no-data|stale|error|loading>
+    let args = Array(CommandLine.arguments.dropFirst(2))
+    let state = args.first ?? "normal"
+    let now = Date(timeIntervalSince1970: 1_767_225_600)
+    let demo = Quota(windows: [
+        QuotaWindow(used: 8, minutes: 300,
+                    resetsAt: now.addingTimeInterval(3 * 3600 + 12 * 60)),
+        QuotaWindow(used: 10, minutes: 10080,
+                    resetsAt: now.addingTimeInterval(5 * 86400 + 15 * 3600)),
+    ])
+    // target 必须活到菜单构建之后：NSMenuItem.target 不持有强引用，
+    // 传临时 NSObject() 会在构建期间就被释放（编译器会就此告警）。
+    final class MenuTarget: NSObject {}
+    let target = MenuTarget()
+    let menu: NSMenu
+    switch state {
+    case "no-data":  menu = AppDelegate.buildDockMenu(target: target, quota: nil, stale: false,
+                                                     loading: false, errorText: nil,
+                                                     cpu: 0.42, memory: 0.61, now: now)
+    case "stale":     menu = AppDelegate.buildDockMenu(target: target, quota: demo, stale: true,
+                                                     loading: false, errorText: nil,
+                                                     cpu: 0.42, memory: 0.61, now: now)
+    case "error":     menu = AppDelegate.buildDockMenu(target: target, quota: nil, stale: true,
+                                                     loading: false,
+                                                     errorText: "Codex 查询超时或进程退出；请检查 CLI 登录状态和网络",
+                                                     cpu: 0.42, memory: 0.61, now: now)
+    case "loading":   menu = AppDelegate.buildDockMenu(target: target, quota: demo, stale: false,
+                                                     loading: true, errorText: nil,
+                                                     cpu: 0.42, memory: 0.61, now: now)
+    default:          menu = AppDelegate.buildDockMenu(target: target, quota: demo, stale: false,
+                                                     loading: false, errorText: nil,
+                                                     cpu: 0.42, memory: 0.61, now: now)
+    }
+    defer { _ = target }
+    print("state=\(state)")
+    for item in menu.items {
+        let title = item.isSeparatorItem ? "--" : item.title
+        print("\(item.isEnabled ? "enabled" : "disabled")\t\(title)")
+    }
     exit(0)
 }
 if CommandLine.arguments.contains("--details-render-test") {
@@ -356,6 +455,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         window.makeKeyAndOrderFront(nil); return true
+    }
+
+    // MARK: - Dock 菜单（右键 Dock 图标）
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        Self.buildDockMenu(target: self, quota: quota, stale: dock.stale,
+                           loading: loading, errorText: errorText, cpu: dock.cpu, memory: dock.memory)
+    }
+
+    /// 构造 Dock 菜单。抽成不依赖 `NSApplication` 实例的静态函数，
+    /// 这样菜单结构可以脱离 Dock 单独验证——Dock 菜单只能在真实 Dock 上
+    /// 右键才弹得出来，没法注入，但「有哪些项、哪些被禁用、文案是否如实」
+    /// 是可以断言的。
+    static func buildDockMenu(target: AnyObject, quota: Quota?, stale: Bool, loading: Bool,
+                              errorText: String?, cpu: Double?, memory: Double?,
+                              now: Date = Date()) -> NSMenu {
+        // 两个来自官方文档的硬约束，不照做菜单就不工作：
+        // 1. Dock 菜单的 target/action 不由系统代为分发，文档要求选中项后
+        //    「invoke NSApp sendAction(_:to:from:)」——所以每个 action 方法
+        //    自己再转发一次，不能只写 target/action 等系统调。
+        // 2. NSMenuItem.isEnabled 在所属菜单 autoenablesItems 为真时完全无效
+        //    （文档原文：no effect unless ... setAutoenablesItems:NO）。默认
+        //    就是自动使能，所以必须显式关掉，否则状态展示项会变成可点击。
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        // 每次显示都重建：菜单只在即将弹出时构建，状态必然是当下的，
+        // 不会因为构建时机早于数据更新而显示过期内容。
+        func info(_ title: String) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            item.attributedTitle = NSAttributedString(
+                string: title, attributes: [.font: NSFont.systemFont(ofSize: 11)])
+            return item
+        }
+        func action(_ title: String, _ selector: Selector, enabled: Bool = true) -> NSMenuItem {
+            let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+            item.target = target
+            item.isEnabled = enabled
+            return item
+        }
+
+        // 状态区：与详情窗口共用同一套取数和文案格式化
+        if let quota, !quota.windows.isEmpty {
+            for value in quota.windows {
+                menu.addItem(info("\(DetailsView.windowTitle(minutes: value.minutes))　剩余 \(value.remaining)%"))
+                if let reset = value.resetsAt.map({ DetailsView.countdown(to: $0, now: now) }) {
+                    menu.addItem(info("　重置 \(reset)"))
+                }
+            }
+            // 与详情窗口一致：没有快照时不说「旧数据」
+            if stale { menu.addItem(info("旧数据，仅供参考")) }
+        } else {
+            menu.addItem(info(loading ? "正在查询额度…" : "暂无额度数据"))
+            if let errorText { menu.addItem(info(errorText)) }
+        }
+        menu.addItem(.separator())
+        menu.addItem(info("CPU　\(cpu.map { String(format: "%.0f%%", $0 * 100) } ?? "采样中")"))
+        menu.addItem(info("内存　\(memory.map { String(format: "%.0f%%", $0 * 100) } ?? "不可用")"))
+        menu.addItem(.separator())
+        // 查询进行中禁用刷新，而不是让点了没反应——对应 refresh() 里的
+        // !loading 守卫，把「不会叠加正在执行的查询」如实暴露给用户
+        menu.addItem(action(loading ? "正在查询…" : "立即刷新额度",
+                            #selector(AppDelegate.dockMenuRefresh), enabled: !loading))
+        menu.addItem(action("打开详情", #selector(AppDelegate.dockMenuShowDetails)))
+        menu.addItem(.separator())
+        menu.addItem(action("退出 Monster Pulse", #selector(AppDelegate.dockMenuQuit)))
+        return menu
+    }
+
+    // Dock 菜单的 action 不由系统分发，需自己转成 sendAction（官方文档要求）。
+    // 只在方法签名能对上时用 sendAction：
+    //   · refresh() 零参，sendAction 正好能调用。
+    //   · applicationShouldHandleReopen(_:hasVisibleWindows:) 是两个参数的协议
+    //     方法，sendAction 无法正确调用它（第一个坑），所以直接做该做的事。
+    @objc private func dockMenuRefresh(_ sender: Any?) {
+        NSApp.sendAction(#selector(refresh), to: self, from: nil)
+    }
+    @objc private func dockMenuShowDetails(_ sender: Any?) {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    @objc private func dockMenuQuit(_ sender: Any?) {
+        NSApp.terminate(nil)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationWillTerminate(_ notification: Notification) {
