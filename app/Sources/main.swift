@@ -20,7 +20,42 @@ func verify() throws {
     let system = sampler.sample()
     guard let cpu = system.cpu, let memory = system.memory,
           (0...1).contains(cpu), (0...1).contains(memory) else { throw ReadError.message("系统采样失败") }
-    print("PASS: quota parsing, missing/invalid/other buckets, CPU and memory sampling")
+
+    // 窗口标题由后端返回的长度推导，不硬编码「五小时」「每周」；
+    // 缺长度或非正数要落到不猜窗口的兜底文案。
+    //
+    // 这里用收集式断言而不是 precondition：precondition 触发 SIGTRAP，
+    // stderr 在 trap 前不冲刷，失败时看不到是哪一条（实测踩过），
+    // 且一次只能暴露一条。改成先跑完全部用例再汇总输出。
+    var failures: [String] = []
+    func expect(_ actual: String, _ expected: String, _ label: String) {
+        if actual != expected { failures.append("\(label)：得到「\(actual)」，期望「\(expected)」") }
+    }
+    for (minutes, expected) in [(300, "5 小时窗口"), (10080, "1 周窗口"), (1440, "1 天窗口"),
+                               (20160, "2 周窗口"), (120, "2 小时窗口"), (100, "100 分钟窗口")] {
+        expect(DetailsView.windowTitle(minutes: minutes), expected, "windowTitle(\(minutes))")
+    }
+    // 90 分钟不是整小时，不能塌缩成「1 小时窗口」——窗口长度以服务返回为准
+    expect(DetailsView.windowTitle(minutes: 90), "90 分钟窗口", "windowTitle(90) 非整小时")
+    for missing in [nil, 0, -5] as [Int?] {
+        expect(DetailsView.windowTitle(minutes: missing), "额度窗口", "windowTitle(\(String(describing: missing)))")
+    }
+
+    // 倒计时：已到期、纯分、纯小时、天+小时；整小时不能退化成「60 分后」
+    let now = Date()
+    for (offset, expected) in [(0.0, "已到期"), (-3600.0, "已到期"),
+                               (60.0 * 30, "30 分后"), (3600.0 * 3, "3 小时后"),
+                               (3600.0 * 3 + 60.0 * 12, "3 小时 12 分后"),
+                               (86400.0 * 5, "5 天后"), (86400.0 * 2 + 3600.0 * 6, "2 天 6 小时后")] {
+        expect(DetailsView.countdown(to: now.addingTimeInterval(offset), now: now),
+               expected, "countdown(+\(Int(offset))s)")
+    }
+
+    if !failures.isEmpty {
+        for line in failures { fputs("FAIL  \(line)\n", stderr) }
+        throw ReadError.message("自检失败 \(failures.count) 项")
+    }
+    print("PASS: quota parsing, missing/invalid/other buckets, CPU and memory sampling, window title and countdown formatting")
 }
 
 if CommandLine.arguments.contains("--self-test") {
@@ -74,6 +109,66 @@ if CommandLine.arguments.contains("--render-test") {
     view.cacheDisplay(in: view.bounds, to: bitmap)
     try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
     print("wrote \(out) remaining=\(view.remaining ?? -1) cpu=\(view.cpu ?? -1) memory=\(view.memory ?? -1) stale=\(view.stale)")
+    exit(0)
+}
+if CommandLine.arguments.contains("--details-render-test") {
+    // 把详情窗口离屏渲染成 PNG，用于视觉回归：改 DetailsView 后要确认外观未变。
+    // 用法: MonsterPulse --details-render-test <out.png> [normal|no-data|stale|error|loading]
+    //
+    // 与 --render-test 同一手法：AppKit 视图可以脱离窗口用 cacheDisplay 渲染，
+    // 不需要真实窗口也不需要 AppKit 事件循环。
+    let args = Array(CommandLine.arguments.dropFirst(2))
+    let out = args.first ?? "/tmp/monsterpulse-details.png"
+    let state = args.count > 1 ? args[1] : "normal"
+    let inset: CGFloat = 22
+    let width: CGFloat = 460
+    let bottomBar: CGFloat = 56
+
+    let details = DetailsView(frame: .zero)
+    // 固定基准时间，不用 Date()：footer 会渲染「更新 HH:mm:ss」，
+    // 用真实时间会让每次渲染都不同，视觉回归逐像素比对必然全 FAIL。
+    let now = Date(timeIntervalSince1970: 1_767_225_600)   // 2026-01-01 08:00:00 UTC
+    // 用例数据也要走真实的 windowTitle / countdown，而不是把文案写死。
+    // 写死字面量会让这两个函数在视觉回归里完全不被执行——实测把 countdown
+    // 改成永远不出分钟、视觉回归仍然 10/10 全过，回归对这段逻辑是盲的。
+    // 改成传固定时间戳后，同一处改动会被 details-normal 判 FAIL。
+    let windows: [(title: String, used: Int, remaining: Int, reset: String?)] = [
+        (DetailsView.windowTitle(minutes: 300), 8, 92,
+         DetailsView.countdown(to: now.addingTimeInterval(3 * 3600 + 12 * 60), now: now)),
+        (DetailsView.windowTitle(minutes: 10080), 10, 90,
+         DetailsView.countdown(to: now.addingTimeInterval(5 * 86400 + 15 * 3600), now: now)),
+    ]
+    switch state {
+    case "no-data":
+        details.update(windows: [], quotaAvailable: false, cpu: nil, memory: nil,
+                       updated: nil, loading: false, errorText: nil, stale: false)
+    case "stale":
+        details.update(windows: windows, quotaAvailable: true, cpu: 0.42, memory: 0.61,
+                       updated: now.addingTimeInterval(-600), loading: false, errorText: nil, stale: true)
+    case "error":
+        details.update(windows: [], quotaAvailable: false, cpu: 0.42, memory: 0.61,
+                       updated: nil, loading: false,
+                       errorText: "Codex 查询超时或进程退出；请检查 CLI 登录状态和网络", stale: true)
+    case "loading":
+        details.update(windows: windows, quotaAvailable: true, cpu: 0.42, memory: 0.61,
+                       updated: now, loading: true, errorText: nil, stale: false)
+    default:
+        details.update(windows: windows, quotaAvailable: true, cpu: 0.42, memory: 0.61,
+                       updated: now, loading: false, errorText: nil, stale: false)
+    }
+
+    let content = details.preferredHeight
+    let total = NSSize(width: width, height: content + inset * 2 + bottomBar)
+    // 容器模拟真实窗口的 contentView，这样 details 的 frame 与线上一致
+    let container = NSView(frame: NSRect(origin: .zero, size: total))
+    container.addSubview(details)
+    details.frame = NSRect(x: inset, y: bottomBar, width: width - inset * 2, height: content)
+    container.layoutSubtreeIfNeeded()
+
+    let bitmap = container.bitmapImageRepForCachingDisplay(in: container.bounds)!
+    container.cacheDisplay(in: container.bounds, to: bitmap)
+    try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
+    print("wrote \(out) state=\(state) size=\(Int(total.width))x\(Int(total.height))")
     exit(0)
 }
 if CommandLine.arguments.contains("--probe") {
@@ -167,7 +262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var timers: [Timer] = []
     var observers: [NSObjectProtocol] = []
     var window: NSWindow!
-    let details = NSTextField(wrappingLabelWithString: "")
+    let details = DetailsView()
     var quota: Quota?
     var updated: Date?
     var errorText: String?
@@ -184,12 +279,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.dockTile.contentView = dock
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 400),
             styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        // 内容高度由 fitWindow 按实际内容算出，这里的初值只影响首帧闪现
         window.title = "Monster Pulse"; window.isReleasedWhenClosed = false
-        details.frame = NSRect(x: 24, y: 75, width: 412, height: 300)
-        details.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         window.contentView?.addSubview(details)
         let button = NSButton(title: "刷新额度", target: self, action: #selector(refresh))
-        button.frame = NSRect(x: 24, y: 24, width: 110, height: 32)
+        button.frame = NSRect(x: 22, y: 14, width: 110, height: 32)
         window.contentView?.addSubview(button)
         let center = NSWorkspace.shared.notificationCenter
         observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
@@ -237,25 +331,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dock.stale = errorText != nil || (updated.map { Date().timeIntervalSince($0) > 300 } ?? false)
         let dockState = "\(dock.remaining ?? -1):\(dock.stale):\(Int((dock.cpu ?? -1) * 100)):\(Int((dock.memory ?? -1) * 100))"
         if dockState != lastDockState { NSApp.dockTile.display(); lastDockState = dockState }
-        var lines = ["Codex 订阅额度" ]
-        if let quota {
-            for (i, value) in quota.windows.enumerated() {
-                let duration = value.minutes.map { "\($0) 分钟窗口" } ?? "窗口 \(i + 1)"
-                lines.append("\(duration)：剩余 \(value.remaining)%")
-                if let reset = value.resetsAt {
-                    let minutes = max(0, Int(ceil(reset.timeIntervalSinceNow / 60)))
-                    lines.append("重置：\(DateFormatter.localizedString(from: reset, dateStyle: .short, timeStyle: .short))（\(minutes) 分钟）")
-                }
-            }
-        } else { lines.append("暂无额度数据") }
-        lines.append("")
-        lines.append("CPU：\(dock.cpu.map { String(format: "%.0f%%", $0 * 100) } ?? "采样中")")
-        lines.append("内存估算：\(dock.memory.map { String(format: "%.0f%%", $0 * 100) } ?? "不可用")")
-        if let updated { lines.append("更新：\(DateFormatter.localizedString(from: updated, dateStyle: .none, timeStyle: .medium))") }
-        if loading { lines.append("正在查询…") }
-        if let errorText { lines.append(errorText) }
-        if dock.stale { lines.append("旧数据，仅供参考") }
-        details.stringValue = lines.joined(separator: "\n")
+        details.update(
+            windows: (quota?.windows ?? []).map { value in
+                (title: DetailsView.windowTitle(minutes: value.minutes),
+                 used: Int(value.used.rounded()),
+                 remaining: value.remaining,
+                 reset: value.resetsAt.map { DetailsView.countdown(to: $0) })
+            },
+            quotaAvailable: quota != nil,
+            cpu: dock.cpu, memory: dock.memory,
+            updated: updated, loading: loading, errorText: errorText, stale: dock.stale)
+        fitWindow()
+    }
+    // 窗口按内容高度调整。styleMask 不含 .resizable，用户无法手动改尺寸，
+    // 因此每次 render 重设 contentSize 不会和用户操作打架。
+    func fitWindow() {
+        let width: CGFloat = 460
+        let inset: CGFloat = 22
+        let bottomBar: CGFloat = 56
+        let content = details.preferredHeight
+        details.frame = NSRect(x: inset, y: bottomBar, width: width - inset * 2, height: content)
+        let target = NSSize(width: width, height: content + inset * 2 + bottomBar)
+        if window.contentView?.frame.size != target { window.setContentSize(target) }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         window.makeKeyAndOrderFront(nil); return true
