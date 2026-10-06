@@ -246,7 +246,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     // 代理
     private let proxyTitle = NSTextField(labelWithString: "Codex 代理")
     private let proxyField = NSTextField(string: "")
-    private let proxyHint = NSTextField(labelWithString: "")
+    /// 用可换行标签：labelWithString 不换行，长提示会被截断（实测过）。
+    private let proxyHint = NSTextField(wrappingLabelWithString: "")
 
     init(config: Config, onChange: @escaping (Config) -> Void) {
         self.config = config
@@ -312,7 +313,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         proxyHint.textColor = .secondaryLabelColor
         proxyHint.stringValue = "留空则不设代理。本应用从 Dock 启动、不经过 shell，因此读不到 .zshrc 里的代理。"
         content.addSubview(proxyHint)
-        rows.append(Row(view: proxyHint, height: 26, gapBefore: 4))
+        // 两行高度：提示文案较长，单行会被截断
+        rows.append(Row(view: proxyHint, height: 30, gapBefore: 5))
 
         let reset = NSButton(title: "恢复默认", target: self, action: #selector(resetToDefaults))
         content.addSubview(reset)
@@ -326,8 +328,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     private var resetButton: NSButton!
 
-    /// 滑杆行的实际视图是「标签容器」，这里用标签本身占位（宽度固定），
-    /// 滑杆单独定位在标签右侧。
+    /// 一个「标签 + 滑杆」行。两视图共用同一行的纵向位置与高度，
+    /// 所以只由标签行计入高度，滑杆行 height=0、gapBefore=0，只负责定位。
     private func appendSlider(_ label: NSTextField, _ slider: NSSlider,
                               height: CGFloat, gapBefore: CGFloat) {
         label.font = .systemFont(ofSize: 12)
@@ -338,35 +340,41 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         content.addSubview(label)
         content.addSubview(slider)
         rows.append(Row(view: label, height: height, gapBefore: gapBefore))
-        rows.append(Row(view: slider, height: height, gapBefore: -height))  // 与标签同行
+        rows.append(Row(view: slider, height: 0, gapBefore: 0))
     }
 
     /// 从上往下排版，再按内容高度调整窗口。
+    ///
+    /// 「标签 + 滑杆」是同一行的两个视图：滑杆行的 `gapBefore` 为负值表示
+    /// 「不额外下移，与前一个标签共用 y」。此前用 `pendingGap` 延迟应用间距，
+    /// 结果间距被重复应用、行序错乱，且 `contentHeight` 对负 gap 取
+    /// `max(0, …)` 使每个滑杆行多算一倍高度，窗口底部因此留出大片空白。
+    /// 这里改成单趟遍历：只按当前行的 gapBefore 下移，遇到滑杆则复用上一标签的 y。
     private func layoutRows() {
         var cursor = content.bounds.height
-        var pendingGap: CGFloat = 0
-        var lastLabel: NSTextField?
-        var labelY: CGFloat = 0
+        var pairedLabelY: CGFloat?
         for row in rows {
-            if row.gapBefore >= 0 { cursor -= pendingGap; pendingGap = row.gapBefore }
+            if row.gapBefore > 0 { cursor -= row.gapBefore }
             cursor -= row.height
-            let isSlider = row.view is NSSlider
-            if isSlider, let label = lastLabel {
-                // 滑杆与前一个标签同行，共用 labelY
+            if row.view is NSSlider, let labelY = pairedLabelY {
                 row.view.frame = NSRect(x: Self.inset + Self.labelWidth + 8, y: labelY,
                                         width: Self.sliderWidth, height: row.height)
+                pairedLabelY = nil    // 只配对紧邻的那一个，标题不会被误配
                 continue
             }
             row.view.frame = NSRect(x: Self.inset, y: cursor,
                                     width: Self.windowWidth - Self.inset * 2, height: row.height)
-            lastLabel = row.view as? NSTextField
-            labelY = cursor
+            pairedLabelY = (row.view is NSTextField && !(row.view is NSSlider)) ? cursor : nil
         }
     }
 
-    /// 窗口高度 = 内容高 + 上下留白 + 底部按钮条
+    /// 窗口高度 = 内容高 + 上下留白 + 底部按钮条。
+    /// 滑杆行不额外计高也不额外计 gap（它的 height 已含在标签行里）。
     private var contentHeight: CGFloat {
-        rows.reduce(0) { $0 + $1.height + max(0, $1.gapBefore) }
+        rows.reduce(0) { total, row in
+            let gap = row.gapBefore > 0 ? row.gapBefore : 0
+            return total + row.height + gap
+        }
     }
 
     private func resizeWindow() {
@@ -466,6 +474,19 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         config.resetToDefaults()
         refreshControls()
         onChange(config)
+    }
+
+    /// 离屏渲染整个窗口内容为 PNG，用于视觉检查面板布局。
+    /// 设置窗口以前没有渲染入口，新增控件是否被挤出可视区只能靠肉眼，
+    /// 容易漏——详情窗口当初就是靠这个手段发现了「参考线画在 CPU 条上」的错误。
+    func renderToPNG(_ path: String) {
+        resizeWindow()
+        guard let content = window.contentView else { return }
+        content.layoutSubtreeIfNeeded()
+        guard let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) else { return }
+        content.cacheDisplay(in: content.bounds, to: bitmap)
+        try? bitmap.representation(using: .png, properties: [:])?
+            .write(to: URL(fileURLWithPath: path))
     }
 
     func show() {

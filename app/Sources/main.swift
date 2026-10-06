@@ -436,6 +436,51 @@ if CommandLine.arguments.contains("--render-test") {
     print("wrote \(out) remaining=\(view.remaining ?? -1) cpu=\(view.cpu ?? -1) memory=\(view.memory ?? -1) stale=\(view.stale)")
     exit(0)
 }
+if CommandLine.arguments.contains("--settings-render-test") {
+    // 把设置窗口离屏渲染成 PNG。与 --details-render-test 同一手法。
+    // 用途：验证面板布局（新增控件有没有被挤出可视区），以及让用户直接看到
+    // 每个配置项长什么样，不必靠猜。
+    // 用法: MonsterPulse --settings-render-test <out.png> [proxy|dns|nometers|full]
+    let args = Array(CommandLine.arguments.dropFirst(2))
+    let out = args.first ?? "/tmp/monsterpulse-settings.png"
+    let state = args.count > 1 ? args[1] : "full"
+    // 用成员初始化而不是 setXxx()：那些 setter 会写 UserDefaults，跑一次渲染
+    // 就会改掉用户的真实配置。渲染是只读操作，不该有持久化副作用。
+    let base = Config.default
+    let config: Config
+    switch state {
+    case "nometers":   config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
+                                      showCPU: false, showMemory: false, alertsEnabled: base.alertsEnabled,
+                                      alertQuotaThreshold: base.alertQuotaThreshold,
+                                      alertResetLeadMinutes: base.alertResetLeadMinutes,
+                                      alertFailureStreak: base.alertFailureStreak,
+                                      diskAlertMBs: base.diskAlertMBs, proxyURL: base.proxyURL)
+    case "alerts-off": config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
+                                      showCPU: base.showCPU, showMemory: base.showMemory, alertsEnabled: false,
+                                      alertQuotaThreshold: base.alertQuotaThreshold,
+                                      alertResetLeadMinutes: base.alertResetLeadMinutes,
+                                      alertFailureStreak: base.alertFailureStreak,
+                                      diskAlertMBs: base.diskAlertMBs, proxyURL: base.proxyURL)
+    case "dns":        config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
+                                      showCPU: base.showCPU, showMemory: base.showMemory,
+                                      alertsEnabled: base.alertsEnabled,
+                                      alertQuotaThreshold: base.alertQuotaThreshold,
+                                      alertResetLeadMinutes: base.alertResetLeadMinutes,
+                                      alertFailureStreak: base.alertFailureStreak,
+                                      diskAlertMBs: base.diskAlertMBs, proxyURL: "")
+    default:           config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
+                                      showCPU: base.showCPU, showMemory: base.showMemory,
+                                      alertsEnabled: base.alertsEnabled,
+                                      alertQuotaThreshold: base.alertQuotaThreshold,
+                                      alertResetLeadMinutes: base.alertResetLeadMinutes,
+                                      alertFailureStreak: base.alertFailureStreak,
+                                      diskAlertMBs: base.diskAlertMBs, proxyURL: "127.0.0.1:12334")
+    }
+    let controller = SettingsWindowController(config: config) { _ in }
+    controller.renderToPNG(out)
+    print("wrote \(out) state=\(state)")
+    exit(0)
+}
 if CommandLine.arguments.contains("--dock-menu-dump") {
     // 把 Dock 菜单结构打成纯文本，供人工排障与自检断言。
     // 格式：每行 "<enabled|disabled>\t<title>"，分隔项显示为 disabled\t--

@@ -60,6 +60,17 @@ DETAILS_CASES=(
   "details-no-data-no-meters"
 )
 
+# 设置面板的用例。此前设置窗口没有渲染入口，新增控件是否被挤出可视区、
+# 提示文案是否被截断都只能靠肉眼——实际就因此漏掉过一个严重的布局 bug：
+# 「标签+滑杆」同行用负 gap 表达，而高度累加对负 gap 取 max(0,…)，导致每个
+# 滑杆行多算一倍高度、间距被重复应用。现在纳入回归。
+SETTINGS_CASES=(
+  "settings-full"
+  "settings-nometers"
+  "settings-alerts-off"
+  "settings-dns"
+)
+
 mkdir -p "$BASE"
 if [ "${1:-}" = "--update" ]; then
   for spec in "${CASES[@]}"; do
@@ -69,6 +80,10 @@ if [ "${1:-}" = "--update" ]; then
   done
   for state in "${DETAILS_CASES[@]}"; do
     "$APP" --details-render-test "$BASE/$state.png" "${state#details-}" >/dev/null \
+      && echo "  基线已更新 $state"
+  done
+  for state in "${SETTINGS_CASES[@]}"; do
+    "$APP" --settings-render-test "$BASE/$state.png" "${state#settings-}" >/dev/null \
       && echo "  基线已更新 $state"
   done
   echo; echo "基准图写入 $BASE"; exit 0
@@ -106,6 +121,13 @@ echo
 echo "详情窗口视觉回归（容差 ${TOL}）"
 for state in "${DETAILS_CASES[@]}"; do
   "$APP" --details-render-test "$WORK/$state.png" "${state#details-}" >/dev/null
+  compare "$state" "$WORK/$state.png"
+done
+
+echo
+echo "设置面板视觉回归（容差 ${TOL}）"
+for state in "${SETTINGS_CASES[@]}"; do
+  "$APP" --settings-render-test "$WORK/$state.png" "${state#settings-}" >/dev/null
   compare "$state" "$WORK/$state.png"
 done
 
