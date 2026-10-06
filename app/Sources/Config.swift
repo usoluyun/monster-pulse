@@ -41,6 +41,7 @@ struct Config {
         static let alertLead = "alertResetLeadMinutes"
         static let alertStreak = "alertFailureStreak"
         static let diskAlertThreshold = "diskReadAlertMBs"
+        static let proxyURL = "codexProxyURL"
     }
 
     var systemInterval: Double
@@ -56,6 +57,15 @@ struct Config {
     var alertFailureStreak: Double
     /// 磁盘读入速率超过此 MB/s 即预警
     var diskAlertMBs: Double
+    /// Codex 子进程使用的代理，如 http://127.0.0.1:12334。
+    ///
+    /// 为什么需要它：从 Dock 启动的应用不经过 shell，**不读 .zshrc**，所以
+    /// 应用进程及其 spawn 出的 codex 子进程都没有 http_proxy/https_proxy。
+    /// 若 codex 需要代理才能连通 API，直接从 Finder/Dock 启动就会查询超时，
+    /// 而在终端跑 --probe 却正常——差别只在这里。
+    ///
+    /// 注意这会以明文存进 UserDefaults（本项目只代理 localhost，一般不含凭据）。
+    var proxyURL: String
 
     static let `default` = Config(systemInterval: defaultSystemInterval,
                                   quotaInterval: defaultQuotaInterval,
@@ -64,7 +74,8 @@ struct Config {
                                   alertQuotaThreshold: defaultAlertThreshold,
                                   alertResetLeadMinutes: defaultAlertLead,
                                   alertFailureStreak: defaultAlertStreak,
-                                  diskAlertMBs: defaultDiskAlert)
+                                  diskAlertMBs: defaultDiskAlert,
+                                  proxyURL: "")
 
     /// 每次启动都要调用，把默认值注册进易失域。
     static func registerDefaults() {
@@ -78,6 +89,7 @@ struct Config {
             Key.alertLead: defaultAlertLead,
             Key.alertStreak: defaultAlertStreak,
             Key.diskAlertThreshold: defaultDiskAlert,
+            Key.proxyURL: "",
         ])
     }
 
@@ -104,7 +116,8 @@ struct Config {
             alertFailureStreak: clamp(d.double(forKey: Key.alertStreak),
                                       alertStreakRange, defaultAlertStreak),
             diskAlertMBs: clamp(d.double(forKey: Key.diskAlertThreshold),
-                                diskAlertRange, defaultDiskAlert))
+                                diskAlertRange, defaultDiskAlert),
+            proxyURL: d.string(forKey: Key.proxyURL) ?? "")
     }
 
     /// 保存单项变更。写入即生效，由调用方负责重启定时器。
@@ -146,11 +159,19 @@ struct Config {
         UserDefaults.standard.set(diskAlertMBs, forKey: Key.diskAlertThreshold)
     }
 
+    mutating func setProxyURL(_ raw: String) {
+        proxyURL = ProxySetting.normalize(raw) ?? ""
+        UserDefaults.standard.set(proxyURL, forKey: Key.proxyURL)
+    }
+
+    /// 规范化后的代理，nil 表示不设代理。查询时注入子进程环境。
+    var effectiveProxy: String? { ProxySetting.normalize(proxyURL) }
+
     mutating func resetToDefaults() {
         self = .default
         for key in [Key.systemInterval, Key.quotaInterval, Key.showCPU, Key.showMemory,
                     Key.alertsEnabled, Key.alertThreshold, Key.alertLead, Key.alertStreak,
-                    Key.diskAlertThreshold] {
+                    Key.diskAlertThreshold, Key.proxyURL] {
             UserDefaults.standard.removeObject(forKey: key)
         }
     }
@@ -218,6 +239,14 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
                                         maxValue: Config.alertStreakRange.upperBound,
                                         target: nil, action: nil)
     private let streakLabel = NSTextField(labelWithString: "")
+    private let diskSlider = NSSlider(value: 200, minValue: Config.diskAlertRange.lowerBound,
+                                      maxValue: Config.diskAlertRange.upperBound,
+                                      target: nil, action: nil)
+    private let diskLabel = NSTextField(labelWithString: "")
+    // 代理
+    private let proxyTitle = NSTextField(labelWithString: "Codex 代理")
+    private let proxyField = NSTextField(string: "")
+    private let proxyHint = NSTextField(labelWithString: "")
 
     init(config: Config, onChange: @escaping (Config) -> Void) {
         self.config = config
@@ -265,6 +294,25 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         appendSlider(thresholdLabel, thresholdSlider, height: 17, gapBefore: 8)
         appendSlider(leadLabel, leadSlider, height: 17, gapBefore: 6)
         appendSlider(streakLabel, streakSlider, height: 17, gapBefore: 6)
+        appendSlider(diskLabel, diskSlider, height: 17, gapBefore: 6)
+
+        append(heading("代理"), height: 15, gapBefore: 20)
+        proxyTitle.font = .systemFont(ofSize: 12)
+        proxyField.isEditable = true
+        proxyField.isBezeled = true
+        proxyField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        proxyField.placeholderString = "如 http://127.0.0.1:12334"
+        proxyField.target = self
+        proxyField.action = #selector(proxyFieldChanged)
+        content.addSubview(proxyTitle)
+        content.addSubview(proxyField)
+        rows.append(Row(view: proxyTitle, height: 17, gapBefore: 10))
+        rows.append(Row(view: proxyField, height: 20, gapBefore: -17))
+        proxyHint.font = .systemFont(ofSize: 10)
+        proxyHint.textColor = .secondaryLabelColor
+        proxyHint.stringValue = "留空则不设代理。本应用从 Dock 启动、不经过 shell，因此读不到 .zshrc 里的代理。"
+        content.addSubview(proxyHint)
+        rows.append(Row(view: proxyHint, height: 26, gapBefore: 4))
 
         let reset = NSButton(title: "恢复默认", target: self, action: #selector(resetToDefaults))
         content.addSubview(reset)
@@ -330,6 +378,24 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     // MARK: 交互
 
+    @objc private func proxyFieldChanged() {
+        let raw = proxyField.stringValue
+        // 输入过程中不强制改写用户的输入（例如正在输入的 "127.0" 不该被
+        // 立刻变成 "http://127.0." 打断）；只在确定非法时才标红提示。
+        if let normalized = ProxySetting.normalize(raw) {
+            proxyHint.stringValue = "将使用：\(normalized)"
+            proxyHint.textColor = .secondaryLabelColor
+        } else if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            proxyHint.stringValue = "留空则不设代理。本应用从 Dock 启动、不经过 shell，因此读不到 .zshrc 里的代理。"
+            proxyHint.textColor = .secondaryLabelColor
+        } else {
+            proxyHint.stringValue = "无法识别为代理地址，将按不设代理处理"
+            proxyHint.textColor = .systemOrange
+        }
+        config.setProxyURL(raw)
+        onChange(config)
+    }
+
     private func refreshControls() {
         systemSlider.doubleValue = config.systemInterval
         quotaSlider.doubleValue = config.quotaInterval
@@ -339,6 +405,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         thresholdSlider.doubleValue = config.alertQuotaThreshold
         leadSlider.doubleValue = config.alertResetLeadMinutes
         streakSlider.doubleValue = config.alertFailureStreak
+        diskSlider.doubleValue = config.diskAlertMBs
+        proxyField.stringValue = config.proxyURL
         updateLabels()
     }
 
@@ -348,11 +416,12 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         thresholdLabel.stringValue = "额度剩余低于 \(Int(thresholdSlider.doubleValue.rounded()))%"
         leadLabel.stringValue = "重置前 \(Int(leadSlider.doubleValue.rounded())) 分钟内"
         streakLabel.stringValue = "连续失败 \(Int(streakSlider.doubleValue.rounded())) 次"
+        diskLabel.stringValue = "磁盘超过 \(Int(diskSlider.doubleValue.rounded())) MB/s"
         // 预警关掉时三个阈值滑杆没有意义，置灰而不是隐藏——
         // 隐藏会让用户以为这个功能不存在
         let on = config.alertsEnabled
-        for slider in [thresholdSlider, leadSlider, streakSlider] { slider.isEnabled = on }
-        for label in [thresholdLabel, leadLabel, streakLabel] {
+        for slider in [thresholdSlider, leadSlider, streakSlider, diskSlider] { slider.isEnabled = on }
+        for label in [thresholdLabel, leadLabel, streakLabel, diskLabel] {
             label.textColor = on ? .labelColor : .disabledControlTextColor
         }
     }
@@ -373,6 +442,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             config.setAlertThreshold(sender.doubleValue.rounded())
         } else if sender === leadSlider {
             config.setAlertLead(sender.doubleValue.rounded())
+        } else if sender === diskSlider {
+            config.setDiskAlertMBs(sender.doubleValue.rounded())
         } else {
             config.setAlertStreak(sender.doubleValue.rounded())
         }

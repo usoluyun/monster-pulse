@@ -325,6 +325,39 @@ func verify() throws {
         failures.append("disk-io 文案应含当前 900 MB/s 与阈值 200 MB/s，得到「\(diskAlert.body)」")
     }
 
+    // 代理规范化。这是 GUI 应用能用上代理的关键一步：Dock 启动的应用不读
+    // .zshrc，必须由用户在设置里填；填错时宁可当作「不设代理」也不要注入
+    // 一个坏值导致查询更难排查。
+    func expectProxy(_ raw: String?, _ expected: String?, _ label: String) {
+        let actual = ProxySetting.normalize(raw)
+        if actual != expected {
+            failures.append("\(label)：得到 \(actual.map { "「\($0)」" } ?? "nil")，"
+                + "期望 \(expected.map { "「\($0)」" } ?? "nil")")
+        }
+    }
+    expectProxy("http://127.0.0.1:12334", "http://127.0.0.1:12334", "完整 URL 原样保留")
+    expectProxy("socks5://127.0.0.1:12334", "socks5://127.0.0.1:12334", "socks5 scheme 保留")
+    expectProxy("127.0.0.1:12334", "http://127.0.0.1:12334", "省略 scheme 按 http 补全")
+    expectProxy("  127.0.0.1:12334  ", "http://127.0.0.1:12334", "首尾空白应被裁掉")
+    expectProxy("", nil, "空串视为不设代理")
+    expectProxy("   ", nil, "纯空白视为不设代理")
+    expectProxy(nil, nil, "nil 视为不设代理")
+    expectProxy("http://", nil, "只有 scheme 没有主机名应拒绝")
+    expectProxy("http://:12334", nil, "缺少主机名应拒绝")
+    expectProxy("http://127.0.0.1:abc", nil, "非法端口应拒绝")
+    // 环境注入：大小写都要设，否则"配了却没生效"极难排查
+    let injected = ProxySetting.environment(from: ["PATH": "/usr/bin"],
+                                             proxy: "http://127.0.0.1:12334")
+    for key in ["http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
+        if injected[key] != "http://127.0.0.1:12334" {
+            failures.append("环境注入缺少或错误的 \(key)：\(injected[key] ?? "nil")")
+        }
+    }
+    if injected["PATH"] != "/usr/bin" { failures.append("环境注入丢了原有 PATH") }
+    if !ProxySetting.environment(from: ["PATH": "/x"], proxy: "  ").keys.contains("PATH") {
+        failures.append("不设代理时不应改动环境")
+    }
+
     if !failures.isEmpty {
         for line in failures { fputs("FAIL  \(line)\n", stderr) }
         throw ReadError.message("自检失败 \(failures.count) 项")
@@ -526,7 +559,7 @@ if CommandLine.arguments.contains("--details-render-test") {
 }
 if CommandLine.arguments.contains("--probe") {
     do {
-        let quota = try CodexReader.read()
+        let quota = try CodexReader.read(proxy: ProcessInfo.processInfo.environment["https_proxy"])
         for window in quota.windows {
             print("Codex: remaining=\(window.remaining)% windowMinutes=\(window.minutes.map(String.init) ?? "unknown") reset=\(window.resetsAt.map { ISO8601DateFormatter().string(from: $0) } ?? "unknown")")
         }
@@ -862,7 +895,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         loading = true; render()
         let operation = BlockOperation()
         operation.addExecutionBlock { [weak self, weak operation] in
-            let result = Result { try CodexReader.read(cancelled: { operation?.isCancelled ?? true }) }
+            let result = Result { try CodexReader.read(proxy: self?.config.proxyURL,
+                                                 cancelled: { operation?.isCancelled ?? true }) }
             DispatchQueue.main.async {
                 guard let self else { return }; self.loading = false
                 switch result {

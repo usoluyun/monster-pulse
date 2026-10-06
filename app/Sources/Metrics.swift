@@ -63,6 +63,52 @@ enum SystemFormat {
     }
 }
 
+/// 代理设置的规范化。
+///
+/// 为什么需要这个：从 Dock/Finder 启动的应用不经过 shell，**不读 .zshrc**，
+/// 所以应用与其 spawn 的 codex 子进程都没有 http_proxy/https_proxy。若 codex
+/// 需要代理才能连通 API，就会查询超时——而在终端跑同一份二进制却正常，
+/// 差别只在于终端有 shell 环境。这不是 CLI 或登录问题。
+enum ProxySetting {
+    /// 规范化为可直接使用的代理 URL；空值或无法识别时返回 nil（表示不设代理）。
+    ///
+    /// 允许用户省略 scheme（填 `127.0.0.1:12334` 即可），因为这比要求用户
+    /// 记全 `http://` 更符合直觉。裸 host:port 按 http 处理。
+    static func normalize(_ raw: String?) -> String? {
+        guard var value = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        // 形如 socks5:// / http:// / https:// 已有 scheme 则不补
+        if !value.contains("://") { value = "http://" + value }
+        // 必须有主机名，且不能是只有 scheme 的空壳
+        guard let url = URL(string: value), let host = url.host, !host.isEmpty else { return nil }
+        // 端口非法（比如 "http://127.0.0.1:abc"）时 URL(string:) 会返回 nil
+        if url.port == nil, let colon = value.lastIndex(of: ":"),
+           value.distance(from: value.index(after: colon), to: value.endIndex) != value.distance(from: value.startIndex, to: value.index(after: colon)),
+           Int(value[value.index(after: colon)...]) == nil {
+            return nil
+        }
+        return value
+    }
+
+    /// 注入 codex 子进程的环境变量。
+    ///
+    /// 大小写两种都设：多数工具读小写，但 Node 系（codex 是 Node 运行时）
+    /// 与部分 C 程序读大写，只设一种会导致"配了却没生效"这种极难排查的情况。
+    /// 不设 NO_PROXY：codex 只连 OpenAI/ChatGPT 端点，不涉及内网域名。
+    static func environment(from base: [String: String], proxy: String?) -> [String: String] {
+        guard let proxy = normalize(proxy) else { return base }
+        var env = base
+        env["http_proxy"] = proxy
+        env["https_proxy"] = proxy
+        env["all_proxy"] = proxy
+        env["HTTP_PROXY"] = proxy
+        env["HTTPS_PROXY"] = proxy
+        env["ALL_PROXY"] = proxy
+        return env
+    }
+}
+
 enum ReadError: LocalizedError {
     case message(String)
     var errorDescription: String? { if case .message(let value) = self { return value }; return nil }
@@ -235,12 +281,19 @@ enum CodexReader {
         return path
     }
 
-    static func read(cancelled: () -> Bool = { false }) throws -> Quota {
+    /// - Parameter proxy: 代理地址，如 `http://127.0.0.1:12334`。为 nil 时用进程
+    ///   当前环境。**必要原因**：GUI 启动的应用不读 .zshrc，没有代理变量，
+    ///   而 codex 可能需要代理才能连通 API。
+    static func read(proxy: String? = nil, cancelled: () -> Bool = { false }) throws -> Quota {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: try executable())
         process.arguments = ["app-server"]
         // Neutral working directory; no thread/start, inference, or project operations.
         process.currentDirectoryURL = URL(fileURLWithPath: NSTemporaryDirectory())
+        if let proxy = ProxySetting.normalize(proxy) {
+            process.environment = ProxySetting.environment(from: ProcessInfo.processInfo.environment,
+                                                          proxy: proxy)
+        }
         let input = Pipe(), output = Pipe()
         process.standardInput = input
         process.standardOutput = output
