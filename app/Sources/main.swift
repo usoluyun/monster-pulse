@@ -261,6 +261,33 @@ func verify() throws {
         failures.append("low-quota 文案应含剩余 15% 与阈值 20%，得到「\(sampleAlert.body)」")
     }
 
+    // 时间进度参考线。只在数据不自洽时返回 nil——缺窗口长度、或 resetsAt
+    // 距现在比整个窗口还远（时钟偏移或陈旧数据，此时画出来的位置是假的）。
+    // 边界值是合法的：刚进入窗口返回 0.0（画在左端），已过期夹到 1.0。
+    let paceNow = Date(timeIntervalSince1970: 1_767_225_600)
+    func pace(_ resetIn: TimeInterval, _ minutes: Int) -> Double? {
+        QuotaFormat.windowProgress(resetsAt: paceNow.addingTimeInterval(resetIn),
+                                   windowMinutes: minutes, now: paceNow)
+    }
+    func expectPace(_ actual: Double?, _ expected: Double?, _ label: String) {
+        switch (actual, expected) {
+        case (nil, nil): return
+        case (let a?, let e?):
+            if abs(a - e) > 0.001 { failures.append("\(label)：得到 \(a)，期望 \(e)") }
+        default:
+            failures.append("\(label)：得到 \(actual.map { "\($0)" } ?? "nil")，期望 \(expected.map { "\($0)" } ?? "nil")")
+        }
+    }
+    // 300 分钟窗口，剩 150 分钟 → 已过一半
+    expectPace(pace(150 * 60, 300), 0.5, "300 分钟窗口剩 150 分钟")
+    expectPace(pace(0, 300), 1.0, "刚好重置")
+    expectPace(pace(300 * 60, 300), 0.0, "刚进入窗口应为 0 而不是 nil")
+    // 已过期不是无效数据：时间确实用完了，夹到 1.0
+    expectPace(pace(-600, 300), 1.0, "已过期夹到 1")
+    expectPace(pace(600 * 60, 300), nil, "剩余超过窗口长度返回 nil")
+    expectPace(pace(60, 0), nil, "缺窗口长度返回 nil")
+    expectPace(pace(60, -5), nil, "非法窗口长度返回 nil")
+
     if !failures.isEmpty {
         for line in failures { fputs("FAIL  \(line)\n", stderr) }
         throw ReadError.message("自检失败 \(failures.count) 项")
@@ -323,6 +350,15 @@ if CommandLine.arguments.contains("--render-test") {
         let meters = args[5]
         view.showCPU = meters != "no-cpu" && meters != "no-both"
         view.showMemory = meters != "no-mem" && meters != "no-both"
+    }
+    // 第 7 个参数可选：pace=已过比例 / activity=亮点相位。用于把动效的
+    // 各分支纳入视觉回归——默认不画，保证既有基准图不受影响。
+    let extras = args.count > 6 ? args[6].split(separator: ",").map(String.init) : []
+    for extra in extras {
+        let parts = extra.split(separator: "=").map(String.init)
+        guard parts.count == 2, let value = Double(parts[1]) else { continue }
+        if parts[0] == "pace" { view.paceMarker = value }
+        if parts[0] == "activity" { view.activity = value; view.pulse = value }
     }
     let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
     view.cacheDisplay(in: view.bounds, to: bitmap)
@@ -459,6 +495,18 @@ final class DockView: NSView {
     var stale = false
     var showCPU = true
     var showMemory = true
+    /// 额度窗口已过的时间比例（0...1），在额度条上标为一道 1pt 亮线。
+    /// 与填充长度对比即可看出用量是超前还是落后于时间进度。
+    var paceMarker: Double?
+    /// CPU 忙碌度（0...1），驱动条内亮点的脉动。nil 表示无读数。
+    ///
+    /// 注意这个值的时效性：host_statistics 的 CPU tick 计数器约每秒才更新一次
+    /// （实测间隔 10ms 时零增量 13/15、200ms 时 6/15、1000ms 时 0/15），所以它
+    /// 是约 1 秒粒度的最近读数。因此亮点的**速度映射没有意义**——它表达的是
+    /// 「当前忙碌程度」这一状态，不是「忙碌变化有多快」。
+    var activity: Double?
+    /// 亮点脉动相位（0...1），由 10fps 动画定时器推进。
+    var pulse: Double = 0
 
     // Dock 图标走 dockTile 离屏渲染，没有 GPU 合成可借力，每次 display 都要 CPU 重画。
     // 静态部分（背景、进度条底槽）与数字文字的排版是主要开销——后者每次都要重跑
@@ -539,8 +587,37 @@ final class DockView: NSView {
             guard meter.shown, let value = meter.value else { continue }
             let rect = NSRect(x: 19, y: 32 - meter.slot * 13, width: 90, height: 7)
             meter.color.setFill()
+            let fillWidth = rect.width * min(1, max(0, value))
             NSBezierPath(roundedRect: NSRect(x: rect.minX, y: rect.minY,
-                width: rect.width * value, height: 7), xRadius: 3, yRadius: 3).fill()
+                width: fillWidth, height: 7), xRadius: 3, yRadius: 3).fill()
+
+            // CPU 条内的亮点：在已填充部分内来回流动，速度 ∝ 忙碌度。
+            // 忙碌度接近 0 时不画——此时定时器也不运行，静止期零开销。
+            if meter.slot == 0, let act = activity, act > 0.02 {
+                let travel = max(0, fillWidth - 6)
+                let x = rect.minX + travel * pulse
+                let alpha = 0.35 + 0.65 * min(1, act)
+                NSColor.white.withAlphaComponent(alpha).setFill()
+                NSBezierPath(ovalIn: NSRect(x: x, y: rect.minY - 1.5,
+                                            width: 4, height: 10)).fill()
+            }
+        }
+
+        // 额度的时间进度轨。必须画在数字正下方而不是任何一条指标条上——
+        // Dock 图标里额度是用大字表示的、没有独立进度条，标在 CPU 条上会让人
+        // 误以为它和 CPU 有关。位置紧贴数值，视觉归属才明确。
+        //
+        // 轨上已走过的一段表示「窗口时间已过去的比例」，与下方额度填充长度
+        // （剩余百分比）不在同一个量上，这里只表达时间。
+        if let pace = paceMarker {
+            let clamped = min(1, max(0, pace))
+            let rail = NSRect(x: 19, y: 42, width: 90, height: 2)
+            NSColor(calibratedWhite: 0.30, alpha: 1).setFill()
+            NSBezierPath(roundedRect: rail, xRadius: 1, yRadius: 1).fill()
+            NSColor.white.withAlphaComponent(0.75).setFill()
+            NSBezierPath(roundedRect: NSRect(x: rail.minX, y: rail.minY,
+                                             width: rail.width * clamped, height: 2),
+                         xRadius: 1, yRadius: 1).fill()
         }
     }
 }
@@ -550,6 +627,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let sampler = SystemSampler()
     let queue = OperationQueue()
     var timers: [Timer] = []
+    /// 动效定时器。只在 CPU 有实际忙碌度时才存在，静止期不创建，
+    /// 保证空闲时零动画开销（详见 updateAnimation 的说明）。
+    var animationTimer: Timer?
     var observers: [NSObjectProtocol] = []
     var window: NSWindow!
     let details = DetailsView()
@@ -589,6 +669,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let center = NSWorkspace.shared.notificationCenter
         observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             self?.sleeping = true; self?.timers.forEach { $0.invalidate() }; self?.queue.cancelAllOperations()
+            self?.stopAnimation()
         })
         observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }; self.sleeping = false; self.sampler.reset(); self.startTimers(); self.tick(); self.refresh()
@@ -643,7 +724,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func tick() {
         guard !sleeping else { return }
-        let data = sampler.sample(); dock.cpu = data.cpu; dock.memory = data.memory; render()
+        let data = sampler.sample(); dock.cpu = data.cpu; dock.memory = data.memory
+        dock.activity = config.showCPU ? data.cpu : nil
+        // 时间进度参考线只跟主窗口（Dock 显示的那个）。参考线随时间缓慢右移：
+        // 300 分钟窗口下每 5 秒约 0.28%，在 90pt 宽的条上是 0.25pt，肉眼不可见，
+        // 所以不需要额外的动画定时器来推进它。
+        if let first = quota?.windows.first, let resetsAt = first.resetsAt,
+           let minutes = first.minutes {
+            dock.paceMarker = QuotaFormat.windowProgress(resetsAt: resetsAt, windowMinutes: minutes)
+        } else {
+            dock.paceMarker = nil
+        }
+        render()
+        updateAnimation()
+    }
+
+    /// 按 CPU 忙碌度启停动效定时器。
+    ///
+    /// 静止期完全不重绘是硬要求：CPU 忙碌度接近 0、或 CPU 显示被关掉时，
+    /// 定时器直接不存在（不是「存在但空转」），此时应用的周期性开销只有
+    /// 系统指标采样与额度轮询本身。
+    func updateAnimation() {
+        // 0.02 以下视为静止：此时亮点只在 0.25pt 范围内移动，看不出来，
+        // 却要付出每 100ms 一次 dockTile 上传与 WindowServer 合成，不划算。
+        let animated = config.showCPU && (dock.activity ?? 0) > 0.02
+        if animated {
+            if animationTimer == nil {
+                let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+                    self?.animationStep()
+                }
+                timer.tolerance = 0.02
+                RunLoop.main.add(timer, forMode: .common)
+                animationTimer = timer
+            }
+        } else {
+            animationTimer?.invalidate()
+            animationTimer = nil
+            dock.pulse = 0
+        }
+    }
+
+    /// 推进亮点相位并重绘 Dock 图标。
+    ///
+    /// 这里的 `dockTile.display()` 绕过了 render() 的 lastDockState 去重判断——
+    /// 那是刻意的：去重是为了避免 5 秒采样时重复重绘，而动效每 100ms 一次、
+    /// 相位每次都变，本来就不该走去重路径。
+    func animationStep() {
+        guard let activity = dock.activity else { return }
+        // 忙碌度越高走越快：低负载约 2.5s 一个来回，高负载约 0.33s
+        let speed = 0.3 + 2.7 * min(1, max(0, activity))
+        dock.pulse += 0.1 * speed
+        if dock.pulse > 1 { dock.pulse -= floor(dock.pulse) }
+        NSApp.dockTile.display()
+    }
+
+    func stopAnimation() {
+        animationTimer?.invalidate()
+        animationTimer = nil
     }
     @objc func openSettings() {
         // 懒加载：设置面板有 12 个控件，用户不开设置时建它纯属浪费内存。
@@ -690,8 +827,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dock.showCPU = config.showCPU
         dock.showMemory = config.showMemory
         // 开关必须计入状态串：否则用户关掉 CPU 后图标内容变了却不会重绘
+        let pace = dock.paceMarker.map { String(format: "%.3f", $0) } ?? "-"
+        let activity = dock.activity.map { String(format: "%.3f", $0) } ?? "-"
         let dockState = "\(dock.remaining ?? -1):\(dock.stale):\(config.showCPU):\(config.showMemory):"
-            + "\(Int((dock.cpu ?? -1) * 100)):\(Int((dock.memory ?? -1) * 100))"
+            + "\(Int((dock.cpu ?? -1) * 100)):\(Int((dock.memory ?? -1) * 100)):\(pace):\(activity)"
         if dockState != lastDockState { NSApp.dockTile.display(); lastDockState = dockState }
         details.update(
             windows: (quota?.windows ?? []).map { value in
@@ -817,7 +956,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationWillTerminate(_ notification: Notification) {
-        timers.forEach { $0.invalidate() }; queue.cancelAllOperations(); queue.waitUntilAllOperationsAreFinished()
+        timers.forEach { $0.invalidate() }; stopAnimation()
+        queue.cancelAllOperations(); queue.waitUntilAllOperationsAreFinished()
         observers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
     }
 }

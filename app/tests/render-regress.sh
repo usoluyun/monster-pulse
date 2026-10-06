@@ -21,22 +21,30 @@ TOL="${TOL:-24}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# 规格固定 6 段：名称:额度:CPU:内存:stale:meters
+# 规格固定 7 段：名称:额度:CPU:内存:stale:meters:extras
 # 段数必须固定，否则 IFS=':' read 会因空段吞掉后面的字段（实测踩过）。
 # meters 取值 both / no-cpu / no-mem / no-both，用于覆盖配置关掉指标后的图标外观。
+# extras 可选，形如 pace=0.45,activity=0.8，用于覆盖动效分支；留空则不画动效，
+# 这样既有基准图不会因为新增动效而全量失效。
 CASES=(
-  "normal-92:92:0.42:0.61:none:both"
-  "low-cpu-45:45:0.08:0.77:none:both"
-  "full-100:100:1.0:1.0:none:both"
-  "stale:88:0.42:0.61:stale:both"
-  "no-data:92:0:0:none:both"
-  "hide-cpu:92:0.42:0.61:none:no-cpu"
-  "hide-mem:92:0.42:0.61:none:no-mem"
-  "hide-both:92:0.42:0.61:none:no-both"
+  "normal-92:92:0.42:0.61:none:both:"
+  "low-cpu-45:45:0.08:0.77:none:both:"
+  "full-100:100:1.0:1.0:none:both:"
+  "stale:88:0.42:0.61:stale:both:"
+  "no-data:92:0:0:none:both:"
+  "hide-cpu:92:0.42:0.61:none:no-cpu:"
+  "hide-mem:92:0.42:0.61:none:no-mem:"
+  "hide-both:92:0.42:0.61:none:no-both:"
   # 无额度数据：remaining 传 nil（渲染成横杠）。stale 与 no-quota-stale 两个
   # 用例断言「没有数字时不该标 OLD」——没有快照就谈不上旧数据。
-  "no-quota:nil:0.42:0.61:none:both"
-  "no-quota-stale:nil:0.42:0.61:stale:both"
+  "no-quota:nil:0.42:0.61:none:both:"
+  "no-quota-stale:nil:0.42:0.61:stale:both:"
+  # 动效分支。extras 是第 7 段：pace=窗口已过比例，activity=亮点相位。
+  "anim-pace:62:0.42:0.61:none:both:pace=0.45"
+  "anim-activity:62:0.42:0.61:none:both:activity=0.8"
+  "anim-both:62:0.42:0.61:none:both:pace=0.45,activity=0.8"
+  # 亮点在已填充部分内移动：填充短时活动范围很小，用 cpu=0.1 覆盖这个边界
+  "anim-lowcpu:62:0.10:0.61:none:both:activity=0.5"
 )
 
 # 详情窗口的用例。规格只有状态名，由应用内部决定该状态的数据，
@@ -55,8 +63,8 @@ DETAILS_CASES=(
 mkdir -p "$BASE"
 if [ "${1:-}" = "--update" ]; then
   for spec in "${CASES[@]}"; do
-    IFS=':' read -r name r c m st meters <<<"$spec"
-    "$APP" --render-test "$BASE/$name.png" "$r" "$c" "$m" "$st" "$meters" >/dev/null \
+    IFS=':' read -r name r c m st meters extras <<<"$spec"
+    "$APP" --render-test "$BASE/$name.png" "$r" "$c" "$m" "$st" "$meters" "$extras" >/dev/null \
       && echo "  基线已更新 $name"
   done
   for state in "${DETAILS_CASES[@]}"; do
@@ -89,8 +97,8 @@ compare() {   # compare <名称> <渲染出的文件>
 
 echo "Dock 图标视觉回归（容差 ${TOL}）"
 for spec in "${CASES[@]}"; do
-  IFS=':' read -r name r c m st meters <<<"$spec"
-  "$APP" --render-test "$WORK/$name.png" "$r" "$c" "$m" "$st" "$meters" >/dev/null
+  IFS=':' read -r name r c m st meters extras <<<"$spec"
+  "$APP" --render-test "$WORK/$name.png" "$r" "$c" "$m" "$st" "$meters" "$extras" >/dev/null
   compare "$name" "$WORK/$name.png"
 done
 

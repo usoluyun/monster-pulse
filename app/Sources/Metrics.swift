@@ -63,6 +63,24 @@ enum QuotaFormat {
         if hours > 0 { return rest > 0 ? "\(hours) 小时 \(rest) 分后" : "\(hours) 小时后" }
         return "\(minutes) 分后"
     }
+
+    /// 窗口已过去的比例，0...1。
+    ///
+    /// 用来在进度条上标出「按时间进度本应消耗多少」，与实际用量对比即可一眼
+    /// 看出是超前还是落后于时间——比单看剩余百分比有用得多。
+    ///
+    /// 返回 nil 只在数据不可信时发生：缺窗口长度，或 `resetsAt` 距现在比整个
+    /// 窗口还远（两者不自洽，可能是时钟偏移或陈旧数据，画出来的位置会是假的）。
+    ///
+    /// 边界值的处理是有意的：`elapsed == 0`（刚进入窗口）返回 0.0 而非 nil——
+    /// 0% 是合法进度，参考线该画在左端；已过期则夹到 1.0，表示时间已全部用尽。
+    static func windowProgress(resetsAt: Date, windowMinutes: Int, now: Date = Date()) -> Double? {
+        guard windowMinutes > 0 else { return nil }
+        let total = Double(windowMinutes) * 60
+        let elapsed = total - resetsAt.timeIntervalSince(now)
+        guard elapsed >= 0 else { return nil }
+        return min(1, max(0, elapsed / total))
+    }
 }
 
 final class SystemSampler {
