@@ -27,6 +27,10 @@ struct Config {
     static let defaultAlertLead = 30.0
     static let defaultAlertStreak = 3.0
 
+    /// 磁盘读入速率预警阈值（MB/s）。跑本地大模型时权重加载会远超这个量级。
+    static let diskAlertRange: ClosedRange<Double> = 20...2000
+    static let defaultDiskAlert = 200.0
+
     private enum Key {
         static let systemInterval = "systemSampleInterval"
         static let quotaInterval = "quotaRefreshInterval"
@@ -36,6 +40,7 @@ struct Config {
         static let alertThreshold = "alertQuotaThreshold"
         static let alertLead = "alertResetLeadMinutes"
         static let alertStreak = "alertFailureStreak"
+        static let diskAlertThreshold = "diskReadAlertMBs"
     }
 
     var systemInterval: Double
@@ -49,6 +54,8 @@ struct Config {
     var alertResetLeadMinutes: Double
     /// 连续失败达到此次数即预警
     var alertFailureStreak: Double
+    /// 磁盘读入速率超过此 MB/s 即预警
+    var diskAlertMBs: Double
 
     static let `default` = Config(systemInterval: defaultSystemInterval,
                                   quotaInterval: defaultQuotaInterval,
@@ -56,7 +63,8 @@ struct Config {
                                   alertsEnabled: true,
                                   alertQuotaThreshold: defaultAlertThreshold,
                                   alertResetLeadMinutes: defaultAlertLead,
-                                  alertFailureStreak: defaultAlertStreak)
+                                  alertFailureStreak: defaultAlertStreak,
+                                  diskAlertMBs: defaultDiskAlert)
 
     /// 每次启动都要调用，把默认值注册进易失域。
     static func registerDefaults() {
@@ -69,6 +77,7 @@ struct Config {
             Key.alertThreshold: defaultAlertThreshold,
             Key.alertLead: defaultAlertLead,
             Key.alertStreak: defaultAlertStreak,
+            Key.diskAlertThreshold: defaultDiskAlert,
         ])
     }
 
@@ -93,7 +102,9 @@ struct Config {
             alertResetLeadMinutes: clamp(d.double(forKey: Key.alertLead),
                                          alertLeadRange, defaultAlertLead),
             alertFailureStreak: clamp(d.double(forKey: Key.alertStreak),
-                                      alertStreakRange, defaultAlertStreak))
+                                      alertStreakRange, defaultAlertStreak),
+            diskAlertMBs: clamp(d.double(forKey: Key.diskAlertThreshold),
+                                diskAlertRange, defaultDiskAlert))
     }
 
     /// 保存单项变更。写入即生效，由调用方负责重启定时器。
@@ -130,10 +141,16 @@ struct Config {
         UserDefaults.standard.set(alertFailureStreak, forKey: Key.alertStreak)
     }
 
+    mutating func setDiskAlertMBs(_ value: Double) {
+        diskAlertMBs = Self.diskAlertRange.contains(value) ? value : Self.defaultDiskAlert
+        UserDefaults.standard.set(diskAlertMBs, forKey: Key.diskAlertThreshold)
+    }
+
     mutating func resetToDefaults() {
         self = .default
         for key in [Key.systemInterval, Key.quotaInterval, Key.showCPU, Key.showMemory,
-                    Key.alertsEnabled, Key.alertThreshold, Key.alertLead, Key.alertStreak] {
+                    Key.alertsEnabled, Key.alertThreshold, Key.alertLead, Key.alertStreak,
+                    Key.diskAlertThreshold] {
             UserDefaults.standard.removeObject(forKey: key)
         }
     }

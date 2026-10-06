@@ -38,7 +38,7 @@ func verify() throws {
         usleep(step); waited += step
         system = sampler.sample()
     }
-    guard let cpu = system.cpu, let memory = system.memory,
+    guard let cpu = system.cpu, let memory = system.memoryFraction,
           (0...1).contains(cpu), (0...1).contains(memory) else { throw ReadError.message("系统采样失败") }
 
     // 窗口标题由后端返回的长度推导，不硬编码「五小时」「每周」；
@@ -179,45 +179,45 @@ func verify() throws {
 
     // 额度充足、无重置临近、无失败 → 无预警
     expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 92, resetIn: 3600 * 3),
-                                               failureStreak: 0, config: alertConfig, now: alertNow)),
+                                               failureStreak: 0, diskReadMBs: nil, config: alertConfig, now: alertNow)),
                  [], "正常状态不应有预警")
     // 剩余 15% 低于默认阈值 20% → 触发；20% 恰好等于阈值不算越线（阈值向上取整）
     expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 15, resetIn: 3600 * 3),
-                                               failureStreak: 0, config: alertConfig, now: alertNow)),
+                                               failureStreak: 0, diskReadMBs: nil, config: alertConfig, now: alertNow)),
                  ["low-quota"], "剩余 15% 应触发额度预警")
     expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 20, resetIn: 3600 * 3),
-                                               failureStreak: 0, config: alertConfig, now: alertNow)),
+                                               failureStreak: 0, diskReadMBs: nil, config: alertConfig, now: alertNow)),
                  [], "剩余 20% 等于阈值不应触发")
     // 重置临近：默认提前 30 分钟
     expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 92, resetIn: 60 * 20),
-                                               failureStreak: 0, config: alertConfig, now: alertNow)),
+                                               failureStreak: 0, diskReadMBs: nil, config: alertConfig, now: alertNow)),
                  ["reset-soon-0"], "20 分钟后重置应触发")
     expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 92, resetIn: 60 * 40),
-                                               failureStreak: 0, config: alertConfig, now: alertNow)),
+                                               failureStreak: 0, diskReadMBs: nil, config: alertConfig, now: alertNow)),
                  [], "40 分钟后重置不应触发")
     // 连续失败默认 3 次：2 次不报、3 次才报
     expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 92, resetIn: 3600 * 3),
-                                               failureStreak: 2, config: alertConfig, now: alertNow)),
+                                               failureStreak: 2, diskReadMBs: nil, config: alertConfig, now: alertNow)),
                  [], "连续失败 2 次不应触发")
     expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 92, resetIn: 3600 * 3),
-                                               failureStreak: 3, config: alertConfig, now: alertNow)),
+                                               failureStreak: 3, diskReadMBs: nil, config: alertConfig, now: alertNow)),
                  ["query-failed"], "连续失败 3 次应触发")
     // 关闭预警后一律不触发
     var muted = Config.default; muted.setAlertsEnabled(false)
     expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 1, resetIn: 60),
-                                               failureStreak: 99, config: muted, now: alertNow)),
+                                               failureStreak: 99, diskReadMBs: nil, config: muted, now: alertNow)),
                  [], "关闭预警后不应有任何预警")
 
     // 跃迁去重：同一条件持续成立只触发一次，条件消失后再次成立才重新触发。
     let tracker = AlertMonitor.Tracker()
     let low = alertWindows(remaining: 15, resetIn: 3600 * 3)
     let normal = alertWindows(remaining: 92, resetIn: 3600 * 3)
-    let firstFire = tracker.update(windows: low, failureStreak: 0, config: alertConfig, now: alertNow)
+    let firstFire = tracker.update(windows: low, failureStreak: 0, diskReadMBs: nil, config: alertConfig, now: alertNow)
     if firstFire.map(\.key) != ["low-quota"] {
         failures.append("Tracker 首次越线应产生 low-quota，得到 \(firstFire.map(\.key))")
     }
     for round in 1...5 {
-        let repeatFire = tracker.update(windows: low, failureStreak: 0, config: alertConfig,
+        let repeatFire = tracker.update(windows: low, failureStreak: 0, diskReadMBs: nil, config: alertConfig,
                                         now: alertNow.addingTimeInterval(TimeInterval(round * 120)))
         if !repeatFire.isEmpty {
             failures.append("Tracker 在条件持续成立时第 \(round) 轮重复触发了 \(repeatFire.map(\.key))")
@@ -225,9 +225,9 @@ func verify() throws {
         }
     }
     // 条件消失后清空，再次越线应重新触发
-    _ = tracker.update(windows: normal, failureStreak: 0, config: alertConfig,
+    _ = tracker.update(windows: normal, failureStreak: 0, diskReadMBs: nil, config: alertConfig,
                        now: alertNow.addingTimeInterval(720))
-    let reFire = tracker.update(windows: low, failureStreak: 0, config: alertConfig,
+    let reFire = tracker.update(windows: low, failureStreak: 0, diskReadMBs: nil, config: alertConfig,
                                now: alertNow.addingTimeInterval(840))
     if reFire.map(\.key) != ["low-quota"] {
         failures.append("Tracker 在条件消失后再次越线应重新触发，得到 \(reFire.map(\.key))")
@@ -235,21 +235,21 @@ func verify() throws {
     // suppress()：关掉再打开预警时，条件通常还成立着，不应立刻再弹一次。
     // 这与 reset() 语义相反——reset() 清空记录，下次会把当前条件当成新跃迁。
     tracker.reset()
-    let reFireAfterReset = tracker.update(windows: low, failureStreak: 0, config: alertConfig,
+    let reFireAfterReset = tracker.update(windows: low, failureStreak: 0, diskReadMBs: nil, config: alertConfig,
                                           now: alertNow.addingTimeInterval(960))
     if reFireAfterReset.map(\.key) != ["low-quota"] {
         failures.append("Tracker.reset() 后应把当前条件当作新跃迁，得到 \(reFireAfterReset.map(\.key))")
     }
-    tracker.suppress(windows: low, failureStreak: 0, config: alertConfig, now: alertNow)
-    let afterSuppress = tracker.update(windows: low, failureStreak: 0, config: alertConfig,
+    tracker.suppress(windows: low, failureStreak: 0, diskReadMBs: nil, config: alertConfig, now: alertNow)
+    let afterSuppress = tracker.update(windows: low, failureStreak: 0, diskReadMBs: nil, config: alertConfig,
                                        now: alertNow.addingTimeInterval(1080))
     if !afterSuppress.isEmpty {
         failures.append("Tracker.suppress() 后不应立即触发，得到 \(afterSuppress.map(\.key))")
     }
     // suppress 之后条件再次成立仍要能触发（说明 suppress 没有把记录写死）
-    _ = tracker.update(windows: normal, failureStreak: 0, config: alertConfig,
+    _ = tracker.update(windows: normal, failureStreak: 0, diskReadMBs: nil, config: alertConfig,
                        now: alertNow.addingTimeInterval(1200))
-    let afterSuppressRefire = tracker.update(windows: low, failureStreak: 0, config: alertConfig,
+    let afterSuppressRefire = tracker.update(windows: low, failureStreak: 0, diskReadMBs: nil, config: alertConfig,
                                              now: alertNow.addingTimeInterval(1320))
     if afterSuppressRefire.map(\.key) != ["low-quota"] {
         failures.append("suppress 后条件再次越线应重新触发，得到 \(afterSuppressRefire.map(\.key))")
@@ -287,6 +287,43 @@ func verify() throws {
     expectPace(pace(600 * 60, 300), nil, "剩余超过窗口长度返回 nil")
     expectPace(pace(60, 0), nil, "缺窗口长度返回 nil")
     expectPace(pace(60, -5), nil, "非法窗口长度返回 nil")
+
+    // 内存与磁盘格式化。速率与容量的单位切换必须正确——写错一个数量级
+    // 就会把 450 MB/s 显示成 450 GB/s，正是最需要说准的那类数。
+    func expectText(_ actual: String, _ expected: String, _ label: String) {
+        if actual != expected { failures.append("\(label)：得到「\(actual)」，期望「\(expected)」") }
+    }
+    expectText(SystemFormat.bytes(1.6e9), "1.5 GB", "1.6e9 字节")
+    expectText(SystemFormat.bytes(860e6), "820 MB", "860MB 字节")
+    expectText(SystemFormat.bytes(4.5e3), "4 KB", "小于 1MB 时用 KB")
+    expectText(SystemFormat.bytes(nil), "—", "nil 字节数")
+    expectText(SystemFormat.bytes(-1), "—", "负值字节数")
+    expectText(SystemFormat.rate(450e6), "429 MB/s", "450MB/s 速率")
+    expectText(SystemFormat.rate(1.5e9), "1.4 GB/s", "超 1000MB/s 用 GB/s")
+    expectText(SystemFormat.rate(500), "0 KB/s", "小于 1KB/s 时用 KB/s")
+    expectText(SystemFormat.rate(nil), "—", "nil 速率")
+    expectText(SystemFormat.percent(0.425), "42%", "百分比")
+    expectText(SystemFormat.percent(nil), "—", "nil 百分比")
+
+    // 磁盘读入预警。默认阈值 200 MB/s：低于不报、等于不报（用 >= 所以等于会报，
+    // 这里按实际语义断言）、高于必报。速率缺失（首帧无差值基准）时不报——
+    // 拿不到数据不等于正常，也不等于异常，不该在缺数据时打扰用户。
+    func diskAlerts(_ mbs: Double?) -> Set<String> {
+        AlertMonitor.activeAlerts(windows: alertWindows(remaining: 92, resetIn: 3600 * 3),
+                                  failureStreak: 0, diskReadMBs: mbs,
+                                  config: alertConfig, now: alertNow)
+    }
+    expectAlerts(diskAlerts(10), [], "磁盘 10MB/s 不应触发")
+    expectAlerts(diskAlerts(200), ["disk-io"], "磁盘等于阈值应触发")
+    expectAlerts(diskAlerts(900), ["disk-io"], "磁盘 900MB/s 应触发")
+    expectAlerts(diskAlerts(nil), [], "磁盘速率缺失不应触发")
+    expectAlerts(diskAlerts(-5), [], "负速率不应触发")
+    // 文案里的速率要与传入值一致（MB/s 进、MB/s 出），不能出现二次换算
+    let diskAlert = AlertMonitor.message(for: "disk-io", windows: [], failureStreak: 0,
+                                         diskReadMBs: 900, config: alertConfig, now: alertNow)
+    if !diskAlert.body.contains("900 MB/s") || !diskAlert.body.contains("200 MB/s") {
+        failures.append("disk-io 文案应含当前 900 MB/s 与阈值 200 MB/s，得到「\(diskAlert.body)」")
+    }
 
     if !failures.isEmpty {
         for line in failures { fputs("FAIL  \(line)\n", stderr) }
@@ -440,26 +477,35 @@ if CommandLine.arguments.contains("--details-render-test") {
     // 配置关掉的指标要能在渲染里体现，否则视觉回归覆盖不到这条分支
     let showCPU = !state.hasSuffix("-no-meters")
     let showMemory = showCPU
+    // 固定的系统读数，磁盘速率刻意给一个高位（阈值 200MB/s 的 2.25 倍），
+    // 让「速率条 + 明细行」在基准图里真的有内容可看。
+    let demoReading = SystemReading(cpu: 0.42, memoryFraction: 0.61,
+                                    compressedBytes: 2.1 * 1_073_741_824,
+                                    diskReadBytesPerSecond: 450 * 1_048_576,
+                                    diskWriteBytesPerSecond: 0,
+                                    swapUsedBytes: 1.6 * 1_073_741_824,
+                                    physicalBytes: 24 * 1_073_741_824)
+    let idleReading = SystemReading()
     switch state {
     case "no-data", "no-data-no-meters":
-        details.update(windows: [], quotaAvailable: false, cpu: nil, memory: nil,
+        details.update(windows: [], quotaAvailable: false, cpu: nil, reading: idleReading,
                        showCPU: showCPU, showMemory: showMemory,
                        updated: nil, loading: false, errorText: nil, stale: false)
     case "stale":
-        details.update(windows: windows, quotaAvailable: true, cpu: 0.42, memory: 0.61,
+        details.update(windows: windows, quotaAvailable: true, cpu: 0.42, reading: demoReading,
                        showCPU: showCPU, showMemory: showMemory,
                        updated: now.addingTimeInterval(-600), loading: false, errorText: nil, stale: true)
     case "error":
-        details.update(windows: [], quotaAvailable: false, cpu: 0.42, memory: 0.61,
+        details.update(windows: [], quotaAvailable: false, cpu: 0.42, reading: demoReading,
                        showCPU: showCPU, showMemory: showMemory,
                        updated: nil, loading: false,
                        errorText: "Codex 查询超时或进程退出；请检查 CLI 登录状态和网络", stale: true)
     case "loading":
-        details.update(windows: windows, quotaAvailable: true, cpu: 0.42, memory: 0.61,
+        details.update(windows: windows, quotaAvailable: true, cpu: 0.42, reading: demoReading,
                        showCPU: showCPU, showMemory: showMemory,
                        updated: now, loading: true, errorText: nil, stale: false)
     default:
-        details.update(windows: windows, quotaAvailable: true, cpu: 0.42, memory: 0.61,
+        details.update(windows: windows, quotaAvailable: true, cpu: 0.42, reading: demoReading,
                        showCPU: showCPU, showMemory: showMemory,
                        updated: now, loading: false, errorText: nil, stale: false)
     }
@@ -635,6 +681,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let details = DetailsView()
     var config = Config.default
     var settings: SettingsWindowController!
+    /// 最近一次系统采样。详情窗口的内存与磁盘区从这里取数。
+    var system = SystemReading()
     /// 额度预警的跃迁检测器。只在条件跨入时触发一次，避免每 120 秒轮询都提醒。
     let alertTracker = AlertMonitor.Tracker()
     /// 连续查询失败次数。成功一次即清零——「连续」的含义就是不能被中间的成功打断。
@@ -712,8 +760,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let windows = (quota?.windows ?? []).map {
             AlertMonitor.Window(minutes: $0.minutes, remaining: $0.remaining, resetsAt: $0.resetsAt)
         }
-        if afterConfigChange { alertTracker.suppress(windows: windows, failureStreak: failureStreak, config: config) }
-        let alerts = alertTracker.update(windows: windows, failureStreak: failureStreak, config: config)
+        let diskReadMBs = system.diskReadBytesPerSecond.map { $0 / 1_048_576 }
+        if afterConfigChange {
+            alertTracker.suppress(windows: windows, failureStreak: failureStreak,
+                                  diskReadMBs: diskReadMBs, config: config)
+        }
+        let alerts = alertTracker.update(windows: windows, failureStreak: failureStreak,
+                                         diskReadMBs: diskReadMBs, config: config)
         guard !alerts.isEmpty else { return }
         for alert in alerts {
             FileHandle.standardError.write(
@@ -724,8 +777,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func tick() {
         guard !sleeping else { return }
-        let data = sampler.sample(); dock.cpu = data.cpu; dock.memory = data.memory
+        let data = sampler.sample()
+        dock.cpu = data.cpu; dock.memory = data.memoryFraction
         dock.activity = config.showCPU ? data.cpu : nil
+        system = data
         // 时间进度参考线只跟主窗口（Dock 显示的那个）。参考线随时间缓慢右移：
         // 300 分钟窗口下每 5 秒约 0.28%，在 90pt 宽的条上是 0.25pt，肉眼不可见，
         // 所以不需要额外的动画定时器来推进它。
@@ -850,7 +905,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             quotaAvailable: quota != nil,
             cpu: config.showCPU ? dock.cpu : nil,
-            memory: config.showMemory ? dock.memory : nil,
+            reading: system,
             showCPU: config.showCPU, showMemory: config.showMemory,
             updated: updated, loading: loading, errorText: errorText, stale: dock.stale)
         fitWindow()

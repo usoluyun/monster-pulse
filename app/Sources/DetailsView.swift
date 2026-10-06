@@ -116,6 +116,56 @@ final class MeterRowView: NSView {
     }
 }
 
+/// 磁盘读入速率条。
+///
+/// 与 CPU/内存的比例条不同，磁盘速率没有天然的 0...1 上界（顺序读 SSD 可以到
+/// 数千 MB/s），所以要按「相对量程」显示：满格代表 `fullScale` MB/s。这个量程
+/// 取当前预警阈值的 4 倍，于是「预警线」落在条的 1/4 处，两者关系一眼可见。
+/// 量程随配置变化是有意的——阈值调低，条随之更容易接近满格，符合直觉。
+final class DiskRateRowView: NSView {
+    static let height: CGFloat = 18
+    private static let nameWidth: CGFloat = 52
+    private static let valueWidth: CGFloat = 68
+
+    private let name = NSTextField(labelWithString: "磁盘读入")
+    private let value = NSTextField(labelWithString: "")
+    private let bar = BarView()
+    private var bytesPerSecond: Double?
+    /// 满格对应的速率（字节/秒）。nil 表示按阈值推算。
+    var fullScale: Double?
+
+    init() {
+        super.init(frame: .zero)
+        name.font = .systemFont(ofSize: 11.5)
+        value.font = .monospacedDigitSystemFont(ofSize: 11.5, weight: .regular)
+        value.alignment = .right
+        bar.color = .systemOrange
+        addSubview(name); addSubview(bar); addSubview(value)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func update(rate: Double?) {
+        bytesPerSecond = rate
+        bar.value = rate.map { value in
+            let scale = fullScale ?? 800 * 1_048_576
+            guard scale > 0 else { return 0 }
+            return min(1, value / scale)
+        }
+        value.stringValue = SystemFormat.rate(rate)
+    }
+
+    override func layout() {
+        super.layout()
+        name.frame = NSRect(x: 0, y: 1, width: Self.nameWidth, height: 15)
+        value.frame = NSRect(x: bounds.width - Self.valueWidth, y: 1,
+                             width: Self.valueWidth, height: 15)
+        let barX = Self.nameWidth + 8
+        bar.frame = NSRect(x: barX, y: (bounds.height - BarView.thickness) / 2,
+                           width: bounds.width - barX - Self.valueWidth - 8,
+                           height: BarView.thickness)
+    }
+}
+
 // MARK: - 详情窗口主体
 
 final class DetailsView: NSView {
@@ -127,6 +177,8 @@ final class DetailsView: NSView {
         static let betweenMeters: CGFloat = 8
         static let beforeFooter: CGFloat = 16
         static let beforeStatus: CGFloat = 7
+        /// 明细行紧跟在其计量条下面，间距比其他计量行更紧
+        static let detailGap: CGFloat = 3
     }
 
     private let header = NSTextField(labelWithString: "Codex 订阅额度")
@@ -137,6 +189,9 @@ final class DetailsView: NSView {
     private let status = NSTextField(labelWithString: "")
     private let cpuRow = MeterRowView(name: "CPU", color: .systemTeal)
     private let memoryRow = MeterRowView(name: "内存", color: .systemPurple)
+    private let diskRow = DiskRateRowView()
+    /// 内存 / 压缩 / Swap 的文字明细，比一根条承载更多数字
+    private let memoryDetail = NSTextField(labelWithString: "")
     private var quotaRows: [QuotaRowView] = []
 
     override init(frame frameRect: NSRect) {
@@ -146,18 +201,22 @@ final class DetailsView: NSView {
         empty.textColor = .secondaryLabelColor
         footer.font = .systemFont(ofSize: 10.5)
         footer.textColor = .secondaryLabelColor
+        memoryDetail.font = .systemFont(ofSize: 10.5)
+        memoryDetail.textColor = .secondaryLabelColor
         status.font = .systemFont(ofSize: 10.5)
         for box in [dividerOne, dividerTwo] {
             box.boxType = .separator
             addSubview(box)
         }
-        for view in [header, empty, cpuRow, memoryRow, footer, status] { addSubview(view) }
+        for view in [header, empty, cpuRow, memoryRow, diskRow, memoryDetail, footer, status] {
+            addSubview(view)
+        }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     /// 结构化数据入口。AppDelegate 只负责取数与判断 stale，视图不含任何业务规则。
     func update(windows: [(title: String, used: Int, remaining: Int, reset: String?)],
-                quotaAvailable: Bool, cpu: Double?, memory: Double?,
+                quotaAvailable: Bool, cpu: Double?, reading: SystemReading,
                 showCPU: Bool, showMemory: Bool,
                 updated: Date?, loading: Bool, errorText: String?, stale: Bool) {
         if quotaRows.count != windows.count {
@@ -176,18 +235,32 @@ final class DetailsView: NSView {
         empty.isHidden = quotaAvailable
         // 被配置关掉的指标整行隐藏，而不是显示成「—」——关掉就是不想看
         cpuRow.isHidden = !showCPU
-        memoryRow.isHidden = !showMemory
         cpuRow.update(showCPU ? cpu : nil)
-        memoryRow.update(showMemory ? memory : nil)
 
-        // 内存的近似占比免责声明只在真的显示内存时出现——关掉内存后还提它
-        // 会让用户以为屏幕上还有个内存指标
+        // 内存区从「一个占比数字」换成三行实测指标，因为占比看不出磁盘 I/O：
+        // 跑本地大模型时最刺眼的是读权重的速率，而内存占比对此一无所知。
+        memoryRow.isHidden = !showMemory
+        diskRow.isHidden = !showMemory
+        memoryDetail.isHidden = !showMemory
+        if showMemory {
+            memoryRow.update(reading.memoryFraction)
+            diskRow.update(rate: reading.diskReadBytesPerSecond)
+            // 已用内存 = 占比 × 总量。占比本身是近似口径，所以这里标「约」。
+            let used = reading.memoryFraction.map { $0 * reading.physicalBytes }
+            var parts = ["内存 \(SystemFormat.bytes(used)) / \(SystemFormat.bytes(reading.physicalBytes > 0 ? reading.physicalBytes : nil))"]
+            if let compressed = reading.compressedBytes, compressed > 0 {
+                parts.append("压缩 \(SystemFormat.bytes(compressed))")
+            }
+            if let swap = reading.swapUsedBytes, swap > 0 {
+                parts.append("Swap \(SystemFormat.bytes(swap))")
+            }
+            memoryDetail.stringValue = parts.joined(separator: " · ")
+        }
+
         let stamp = updated.map {
             "更新 " + DateFormatter.localizedString(from: $0, dateStyle: .none, timeStyle: .medium)
         } ?? "尚未获取额度"
-        var footerParts = [stamp]
-        if showMemory { footerParts.append("内存为近似占比，非内存压力") }
-        footer.stringValue = footerParts.joined(separator: " · ")
+        footer.stringValue = stamp
 
         // 状态行优先级：错误 > 过期 > 加载中。
         // 「旧数据，仅供参考」只在真的有快照时才说——首次查询就失败时根本
@@ -213,13 +286,14 @@ final class DetailsView: NSView {
             total += Gap.beforeDivider + 1 + Gap.afterDivider
         }
         // 被隐藏的计量行不占高度，也不出现在其前后的间隔里
-        let meters = [cpuRow, memoryRow].filter { !$0.isHidden }
+        let meters = [cpuRow, memoryRow, diskRow].filter { !$0.isHidden }
         for (index, row) in meters.enumerated() {
             if index > 0 { total += Gap.betweenMeters }
             total += MeterRowView.height
         }
-        if !meters.isEmpty { total += Gap.beforeDivider + 1 + Gap.beforeFooter }
-        total += 13
+        if !meters.isEmpty { total += Gap.beforeDivider + 1 + Gap.afterDivider }
+        if !memoryDetail.isHidden { total += Gap.detailGap + 13 }
+        total += Gap.beforeFooter + 13
         if !status.stringValue.isEmpty { total += Gap.beforeStatus + statusSize.height }
         return total
     }
@@ -253,11 +327,13 @@ final class DetailsView: NSView {
             }
             place(dividerOne, 1, gap: Gap.afterDivider)
         }
-        let meters = [cpuRow, memoryRow].filter { !$0.isHidden }
+        let meters = [cpuRow, memoryRow, diskRow].filter { !$0.isHidden }
         for (index, row) in meters.enumerated() {
-            place(row, MeterRowView.height, gap: index < meters.count - 1 ? Gap.betweenMeters : Gap.beforeDivider)
+            let gap = index < meters.count - 1 ? Gap.betweenMeters : Gap.afterDivider
+            place(row, MeterRowView.height, gap: gap)
         }
         if !meters.isEmpty { place(dividerTwo, 1, gap: Gap.beforeFooter) }
+        if !memoryDetail.isHidden { place(memoryDetail, 13, gap: 0) }
         place(footer, 13, gap: Gap.beforeStatus)
         if !status.stringValue.isEmpty { place(status, statusSize.height, gap: 0) }
     }
