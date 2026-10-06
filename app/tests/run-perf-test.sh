@@ -23,12 +23,31 @@ INTERVAL="${PERF_INTERVAL:-60}"
 
 mkdir -p "$OUT"
 
+load_pids=""
 cleanup() {
+  stop_load
   pkill -9 -x MonsterPulse 2>/dev/null
   osascript -e 'tell application "Activity Monitor" to quit' 2>/dev/null
   sleep 1
 }
 trap cleanup EXIT
+
+# 受控背景负载。目的：让 MonsterPulse 的 CPU 动效定时器确实在运行——
+# 忙碌度 ≤0.02 时定时器根本不创建，不施加负载就测不到动效的真实开销
+# （含 dockTile 上传与 WindowServer 合成，进程内基准测不到这部分）。
+# 关键是**双方同等负载**：活动监视器也跑在同样的负载下，对照才公平。
+start_load() {
+  stop_load
+  [ "${PERF_LOAD:-1}" = "1" ] || return
+  # 占住 1 个核，避免压满全机影响对比
+  yes >/dev/null & load_pids="$load_pids $!"
+}
+
+stop_load() {
+  local pid
+  for pid in $load_pids; do kill "$pid" 2>/dev/null; done
+  load_pids=""
+}
 
 close_window() {
   osascript -e 'tell application "System Events" to tell process "MonsterPulse"
@@ -38,20 +57,24 @@ close_window() {
 }
 
 echo "性能验收：${ROUNDS} 轮 × ${CYCLE_MINUTES} 分钟，对比活动监视器"
-echo "两者严格分开单独运行；唤醒次数需 powermetrics(sudo)，本次未采集。"
+echo "两者严格分开单独运行，且各自跑在同样的 1 核受控负载下（让动效真正运行）。"
+echo "唤醒次数需 powermetrics(sudo)，本次未采集。"
 echo "输出：$OUT"
 echo
 
 run_dock() { # 标签  是否关闭详情窗
   local label="$1" close="$2"
   cleanup
-  CODEX_BIN="${CODEX_BIN:-$(command -v codex)}" "$APP" >/dev/null 2>&1 &
+  # 应用日志落盘：事后要核对动效定时器在测量期间确实在运行
+  CODEX_BIN="${CODEX_BIN:-$(command -v codex)}" "$APP" >"$OUT/$label.app.log" 2>&1 &
   local pid=$!
   sleep 6   # 等首帧绘制与首次额度查询完成
   [ "$close" = "yes" ] && close_window
   echo "  → MonsterPulse pid=$pid 详情$( [ "$close" = yes ] && echo 关闭 || echo 打开 )"
+  start_load
   python3 "$MEASURE" --pid "$pid" "$label" "$(( CYCLE_MINUTES * 60 ))" "$INTERVAL" \
     >"$OUT/$label.csv"
+  stop_load
   pkill -9 -x MonsterPulse 2>/dev/null
 }
 
@@ -60,13 +83,23 @@ run_activity_monitor() { # 标签
   cleanup
   open -a "Activity Monitor"
   sleep 10
-  local pid; pid="$(pgrep -x 'Activity Monitor' | head -1)"
-  if [ -z "$pid" ]; then
+  # 收集**全部**相关进程，不只 head -1。历史记录里「只测到主进程」导致低估
+  # 对比方、使对比偏向 MonsterPulse 有利。XPC service 由 launchd 拉起
+  # （父进程不是 AM 本身），descendants() 抓不到，所以这里按进程名全量匹配。
+  # 2026-10-06 实测：macOS 27.0.1 上活动监视器已是单进程、无 helper，此时
+  # 列表长度为 1；但不能假设其他系统版本也如此，故按列表全量计量。
+  local pids; pids="$(pgrep -x 'Activity Monitor' | paste -sd, -)"
+  if [ -z "$pids" ]; then
     echo "  → 活动监视器启动失败，跳过本轮"; return
   fi
-  echo "  → Activity Monitor pid=$pid 窗口打开"
-  python3 "$MEASURE" --pid "$pid" "$label" "$(( CYCLE_MINUTES * 60 ))" "$INTERVAL" \
+  # 用 awk 而非 wc -l：printf 不带尾换行时 wc -l 会少算最后一个
+  local n; n="$(printf '%s,' "$pids" | awk -F, '{print NF-1}')"
+  echo "  → Activity Monitor pids=$pids （${n} 个进程）"
+  [ "$n" -gt 1 ] && echo "    注意：检测到多进程，已全部纳入计量"
+  start_load
+  python3 "$MEASURE" --pid "$pids" "$label" "$(( CYCLE_MINUTES * 60 ))" "$INTERVAL" \
     >"$OUT/$label.csv"
+  stop_load
   osascript -e 'tell application "Activity Monitor" to quit' 2>/dev/null
 }
 
@@ -80,7 +113,10 @@ for round in $(seq 1 "$ROUNDS"); do
   echo "[$round/$ROUNDS] Activity Monitor · 窗口打开 · ${CYCLE_MINUTES} 分钟"
   run_activity_monitor "am-r$round-baseline"
 
-  echo
+  # 核对动效是否在测量期间运行过。CPU 对比的有效性依赖于此——
+  # 忙碌度 ≤0.02 时定时器不创建，动效开销为零，测到的就不是真实成本。
+  starts="$(grep -c 'anim start' "$OUT/dock-r$round-baseline.app.log" 2>/dev/null || echo 0)"
+  echo "  → 动效核对：dock-r$round-baseline 日志中 anim start 出现 ${starts} 次"
 done
 
 echo "采样完成，汇总："

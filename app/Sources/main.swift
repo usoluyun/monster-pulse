@@ -756,12 +756,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 timer.tolerance = 0.02
                 RunLoop.main.add(timer, forMode: .common)
                 animationTimer = timer
+                // 动效是否真的在运行，直接关系到性能测量的结论是否成立
+                // （不运行就测不到 dockTile 上传与 WindowServer 合成的开销）。
+                // 打印出来让性能脚本事后能核对，不靠假设。
+                log("anim start activity=\(dock.activity ?? 0)")
             }
         } else {
+            if animationTimer != nil { log("anim stop") }
             animationTimer?.invalidate()
             animationTimer = nil
             dock.pulse = 0
         }
+    }
+
+    private func log(_ message: String) {
+        FileHandle.standardError.write("MP \(message)\n".data(using: .utf8)!)
     }
 
     /// 推进亮点相位并重绘 Dock 图标。

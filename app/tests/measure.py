@@ -67,6 +67,22 @@ def descendants(root):
     return result
 
 
+def kids_of(roots):
+    """roots 的全部后代，并去掉本身就属于 roots 的（多根时避免重复计数）。
+
+    注意：XPC service 由 launchd 拉起，父进程是 launchd 而非被测应用，
+    所以 descendants() 抓不到它。这类进程必须由调用方用 --pid 显式传入，
+    这就是 --pid 支持逗号分隔多个根进程的原因。
+    """
+    seen, out = set(roots), []
+    for r in roots:
+        for d in descendants(r):
+            if d not in seen:
+                seen.add(d)
+                out.append(d)
+    return out
+
+
 def footprint_kb(pid):
     """footprint 输出的 Footprint 行，带单位，换算成 KB。"""
     try:
@@ -108,7 +124,7 @@ def pid_alive(pid):
 
 def usage():
     print(
-        "用法: measure.py --pid <pid> <label> <duration_s> <interval_s>\n"
+        "用法: measure.py --pid <pid[,pid...]> <label> <duration_s> <interval_s>\n"
         "\n"
         "只测量**已在运行**的进程，不负责启动与结束——状态由调用方摆好。\n"
         "这点很关键：App 场景要先摆好状态（详情窗开/关）再开始计量；\n"
@@ -123,11 +139,15 @@ def main():
         return 1
 
     i = args.index("--pid")
-    pid = int(args[i + 1])
+    # --pid 接受逗号分隔的多个根进程。单进程时与原来等价；多进程架构
+    # （如某些系统的活动监视器带 XPC helper）必须把所有根进程都传进来，
+    # 只取 head -1 会漏掉 helper 的 CPU 与内存，导致低估对比方。
+    roots = [int(x) for x in args[i + 1].split(",") if x.strip()]
     label, duration, interval = args[i + 2], float(args[i + 3]), float(args[i + 4])
 
-    if not pid_alive(pid):
-        sys.exit("pid %s 不存在，先启动目标再测量" % pid)
+    for p in roots:
+        if not pid_alive(p):
+            sys.exit("pid %s 不存在，先启动目标再测量" % p)
 
     time.sleep(2)   # 稳定期：让启动开销与首次查询落在计量区间之外
 
@@ -154,10 +174,10 @@ def main():
         elapsed = time.time() - t0
         if elapsed >= duration:
             break
-        kids = descendants(pid)
-        root_cpu = cputime_of(pid)
+        kids = kids_of(roots)
+        root_cpu = sum(cputime_of(p) for p in roots)
         child_cpu = sum(cputime_of(k) for k in kids)
-        app_phys = footprint_kb(pid)
+        app_phys = sum(footprint_kb(p) for p in roots)
         child_phys = sum(footprint_kb(k) for k in kids)
         peak_app = max(peak_app, app_phys)
         peak_child = max(peak_child, child_phys)
@@ -169,7 +189,8 @@ def main():
         time.sleep(interval)
 
     # 不终止被测进程：它的状态与存活由调用方决定，这里只负责计量
-    total_cpu = cputime_of(pid) + sum(cputime_of(k) for k in descendants(pid))
+    total_cpu = (sum(cputime_of(p) for p in roots)
+                 + sum(cputime_of(k) for k in kids_of(roots)))
     print(f"# {label}: 采样 {n} 点 / {duration:.0f}s  "
           f"末次累计CPU={total_cpu:.1f}s  "
           f"应用物理内存峰值={peak_app/1024:.1f}MB  "
