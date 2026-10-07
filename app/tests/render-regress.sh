@@ -27,20 +27,38 @@ trap 'rm -rf "$WORK"' EXIT
 # extras 可选，形如 pace=0.45,activity=0.8，用于覆盖动效分支；留空则不画动效，
 # 这样既有基准图不会因为新增动效而全量失效。
 CASES=(
-  # 新签名：<name>:<levels>:<phase>
-  # levels: 三个 0~100 的数（CPU,GPU,Quota），-1 = 该点 present=false 不画
-  # phase: 心跳相位 0~1，控制各点处于包络的峰或谷
-  "idle:0,0,0:0.5"
-  "cpu-only:70,0,0:0.17"
-  "gpu-only:0,95,0:0.17"
-  "quota-only:0,0,50:0.17"
-  "all-mid:40,55,20:0.17"
-  "peak-frame:40,55,20:0.17"
-  "valley-frame:40,55,20:0.62"
-  "full:100,100,100:0.17"
-  "no-quota:60,40,-1:0.17"
-  "no-meters:-1,-1,30:0.17"
-  "empty:-1,-1,-1:0.5"
+  # 新签名：<remaining> <cpu> <stale|none> <meters> <extras>
+  # extras: gpu= / rail=<used>/<elapsed>（5h轨，elapsed 传 -1 画无刻度）/
+  #         rail2=<used>/<elapsed>（周轨）/ activity=闪烁相位 / nogpu / nogpumeter
+  # meters: both / no-cpu / no-gpu / no-both
+  #
+  # rail 与 rail2 是额度轨（bullet graph）：填充=已用%，刻度=时间已过%。
+  # 两条轨默认都给典型值——不给的话退化为「无额度数据」外观，与真实使用不符。
+  "normal-92:92:0.42:none:both:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30"
+  "low-cpu-45:45:0.08:none:both:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30"
+  "full-100:100:1.0:stale:both:gpu=1.0,rail=1.0/1.0,rail2=1.0/1.0"
+  "stale:88:0.42:stale:both:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30"
+  "no-data:92:0:none:both:gpu=0.12"
+  "hide-cpu:92:0.42:none:no-cpu:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30"
+  "hide-gpu:92:0.42:none:no-gpu:gpu=0.5,rail=0.35/0.42,rail2=0.12/0.30"
+  "hide-both:92:0.42:none:no-both:gpu=0.5,rail=0.35/0.42,rail2=0.12/0.30"
+  # 无额度数据：remaining 传 nil（渲染成横杠）。stale 与 no-quota-stale 断言
+  # 「没有数字时不该标 OLD」；无轨状态下背板也不画轨底槽（backdropRails 机制）。
+  "no-quota:nil:0.42:none:both:gpu=0.12"
+  "no-quota-stale:nil:0.42:stale:both:gpu=0.12"
+  # 闪烁相位两个极端：亮与暗。activity= 同时代入 pulse。
+  "blink-on:62:0.42:none:both:gpu=0.55,rail=0.35/0.42,rail2=0.12/0.30,activity=0.2"
+  "blink-off:62:0.42:none:both:gpu=0.55,rail=0.35/0.42,rail2=0.12/0.30,activity=0.7"
+  # 低于忙碌阈值不画闪点（activity 相位亮也无点）
+  "idle-nodot:62:0.01:none:both:gpu=0.01,rail=0.35/0.42,rail2=0.12/0.30,activity=0.2"
+  # 跑本地大模型：CPU 低、GPU 满。这是这套图标最该被一眼看出来的场景。
+  "gpu-busy:62:0.10:none:both:gpu=0.98,rail=0.35/0.42,rail2=0.12/0.30,activity=0.2"
+  # 烧得快：used(0.55) > elapsed(0.30)+0.05 → 5h 轨转琥珀色
+  "burning:62:0.10:none:both:gpu=0.98,rail=0.55/0.30,activity=0.2"
+  # 周轨单独变化：只给 rail 不给 rail2 → 只有 5h 轨有底槽
+  "single-rail:62:0.42:none:both:gpu=0.12,rail=0.35/0.42"
+  # 刻度缺失（无 resetsAt 时间信息）→ 填充照画、刻度不画
+  "no-tick:62:0.42:none:both:gpu=0.12,rail=0.35/-1,rail2=0.12/-1"
 )
 
 # 详情窗口的用例。规格只有状态名，由应用内部决定该状态的数据，
@@ -73,8 +91,8 @@ SETTINGS_CASES=(
 mkdir -p "$BASE"
 if [ "${1:-}" = "--update" ]; then
   for spec in "${CASES[@]}"; do
-    IFS=':' read -r name levels phase <<<"$spec"
-    "$APP" --render-test "$BASE/$name.png" "$levels" "$phase" >/dev/null \
+    IFS=':' read -r name r c m st meters extras <<<"$spec"
+    "$APP" --render-test "$BASE/$name.png" "$r" "$c" "$m" "$st" "$meters" "$extras" >/dev/null \
       && echo "  基线已更新 $name"
   done
   for state in "${DETAILS_CASES[@]}"; do
@@ -111,8 +129,8 @@ compare() {   # compare <名称> <渲染出的文件>
 
 echo "Dock 图标视觉回归（容差 ${TOL}）"
 for spec in "${CASES[@]}"; do
-  IFS=':' read -r name levels phase <<<"$spec"
-  "$APP" --render-test "$WORK/$name.png" "$levels" "$phase" >/dev/null
+  IFS=':' read -r name r c m st meters extras <<<"$spec"
+  "$APP" --render-test "$WORK/$name.png" "$r" "$c" "$m" "$st" "$meters" "$extras" >/dev/null
   compare "$name" "$WORK/$name.png"
 done
 
