@@ -174,12 +174,32 @@ AGENTS.md、README、验证报告和待办。**这条结论从未实测**——�
   `https://developer.apple.com/documentation/appkit/nswindow/isreleasedwhenclosed.md`。
   大小写规则不统一且无推导规律，须传 Swift 源码里的原始符号名，404 再试全小写。
   详见 chezmoi 的 `apple-docs` skill。
-- **离屏渲染必须钉死外观**：视图不在窗口里时 `labelColor` 等动态颜色解析不出来，
-  文字被画成白色，而窗口背景跟随系统外观也是白色，白字白底——浅色下渲染出的
-  PNG 一个字都没有。三个 `--*-render-test` 都已钉 `darkAqua`。
+- **离屏渲染要同时钉外观和背景色**，两件事缺一不可：
+  - **钉外观**：视图不在窗口里时 `labelColor` 等动态颜色解析不出来，文字被画成
+    白色，而窗口背景跟随系统外观也是白色，白字白底——浅色下渲染出的 PNG 一个字
+    都没有。三个 `--*-render-test` 都已钉 `darkAqua`。
+  - **垫背景色**：`NSWindow` 的 contentView 若 `wantsLayer` 且没有自己的底色，
+    `cacheDisplay` 出来的位图背景是**透明**的。真实窗口里窗口自己垫了
+    `windowBackgroundColor` 所以看不出来，离屏没有窗口就穿帮了。
+    `renderToPNG` 现在显式设 `content.layer?.backgroundColor`，且必须在设完
+    appearance **之后**取 `cgColor`，否则动态色按当时的当前外观解析，等于白垫。
+    （`DetailsView` 在 `draw()` 里自己填底色，所以它天然没事。）
+- **`main.swift` 顶层全局量必须声明在使用之前。** 顶层代码按顺序执行，
+  `renderAppearance` 原先声明在文件中部而 `--settings-render-test` 在它之前就读，
+  拿到的是 nil——编译器不报错，只有真渲染才看得出。更坑的是它**掩盖了上面那个
+  背景色 bug**：appearance 为 nil 时文字按系统外观成深色，深字配透明底反而
+  「能看见」，于是基准图一直是错的却没人发现。**一个 bug 挡住另一个 bug 时，
+  先确认前一个是不是真的不存在。**
+- **视觉基准图不该依赖机器真实状态。** 开机自启勾选原先直接读
+  `SMAppService.status`，于是「用户开没开自启」「跑的是 `.build` 还是
+  `/Applications`」都会让基线漂移。现在一律由夹具注入固定值。
   **注意别用「每次先 --update 重建基准图」掩盖外观变化**，那样这个依赖永远发现不了。
 - **CPU tick 计数器约每秒才更新一次**（实测零增量比例：10ms 为 13/15、200ms 为
   6/15、1000ms 为 0/15）。任何短于 1 秒的 CPU 采样都拿不到值，别为此设计动效。
+- **`systemUptime` 只在 CPU 真正运行时推进，跨睡眠不涨**（实测两次，Clamshell Sleep）：
+  776s 墙钟 → 181.7s uptime（23%）；1170.7s → 64.5s（5.5%）。**拿它当时间分母，
+  在任何跨睡眠的区间上都会严重偏小**——磁盘速率会低估约 18 倍。算速率要用
+  `Date()` 的墙钟差，不是 uptime 差。
 - **`pageins`/`pageouts` 是亚秒级更新的**，可算磁盘 I/O 速率；已实测读 684MB
   文件时换算出 4489 MB/s，与实际 4493 MB/s 吻合。但它只反映**首次加载**的突发，
   文件进页缓存后就不再增长。

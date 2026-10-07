@@ -1,6 +1,23 @@
 import AppKit
 import Darwin
 
+// 离屏渲染统一钉死深色外观。
+//
+// 为什么必须钉：视图不在窗口里时，`labelColor` 这类动态颜色解析不出来，文字
+// 会被画成白色；而窗口背景跟随系统外观变成白色，于是白字白底——文字整个消失。
+// 实测同一命令在系统浅色外观下渲染出的 PNG 一个字都没有。
+//
+// 顺带暴露了视觉回归的一个盲区：此前每次都先 --update 重生成基准图，外观变化
+// 被基准图重建掩盖，因此这个依赖一直没被发现。钉死外观后基准图才真正可比。
+//
+// **必须声明在使用之前。** `main.swift` 顶层代码按顺序执行，全局量在执行到
+// 声明语句之前处于「未初始化」状态。这个声明原先在文件中部，而
+// `--settings-render-test` 在它之前就读取了 —— 于是 `content.appearance` 拿到
+// nil，文字按系统外观解析成深色、窗口背景却是浅色，浅色下整套标签与勾选框
+// 直接消失（只剩滑块、输入框这类有实心底色的控件）。
+// 前向引用是「碰巧能用」的写法：编译器不报错，只有真去渲染才看得出。
+let renderAppearance = NSAppearance(named: .darkAqua)!
+
 // A broken child-process pipe must become an error rather than terminate the app.
 signal(SIGPIPE, SIG_IGN)
 
@@ -477,28 +494,19 @@ if CommandLine.arguments.contains("--settings-render-test") {
                                       diskAlertMBs: base.diskAlertMBs, proxyURL: "127.0.0.1:12334")
     }
     let controller = SettingsWindowController(config: config) { _ in }
-    // 自启状态是机器上的真实状态，不注入固定值的话，基线图会随用户是否开启过
-    // 自启而漂移。login-on / login-off 两个夹具把两种状态都画出来。
-    switch state {
-    case "login-on":  controller.renderLaunchAtLoginOverride = true
-    case "login-off": controller.renderLaunchAtLoginOverride = false
-    default:          break
-    }
+    // 自启状态一律钉死，不读系统真值。
+    //
+    // 不钉的话基线图会随「用户是否开启过自启」「跑的是 .build 还是
+    // /Applications」而漂移——两者都会变，而基准图不该跟着变。只有
+    // login-on 一个夹具画开启态，其余（含 full）都画关闭态。
+    // 读系统真值那条路径由真机点验覆盖，不由基准图覆盖。
+    controller.renderLaunchAtLoginOverride = (state == "login-on")
     controller.renderAppearance = renderAppearance
     controller.renderToPNG(out)
     print("wrote \(out) state=\(state)")
     print("layout: \(controller.layoutDiagnostics())")
     exit(0)
 }
-// 离屏渲染统一钉死深色外观。
-//
-// 为什么必须钉：视图不在窗口里时，`labelColor` 这类动态颜色解析不出来，文字
-// 会被画成白色；而窗口背景仍跟随系统外观变成白色，于是白字白底——文字整个消失。
-// 实测同一命令在系统浅色外观下渲染出的 PNG 一个字都没有。
-//
-// 顺带暴露了视觉回归的一个盲区：此前每次都先 --update 重生成基准图，外观变化
-// 被基准图重建掩盖，因此这个依赖一直没被发现。钉死外观后基准图才真正可比。
-let renderAppearance = NSAppearance(named: .darkAqua)!
 
 if CommandLine.arguments.contains("--dock-menu-dump") {
     // 把 Dock 菜单结构打成纯文本，供人工排障与自检断言。
@@ -815,6 +823,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config = Config.load()
         // 诊断通道：仅在 MP_SAMPLE_LOG 指定时逐次采样落盘
         openSampleLog()
+        // 启动即写一条：既确认诊断通道真的通了，也在分析时给出「进程从何时开始存在」
+        // 这个基准——否则 CSV 里一段空白无法区分「没记录」和「真没发生」。
+        log(String(format: "启动 pid=%d 系统指标 %.0fs / 额度 %.0fs / 布局=%@",
+                  ProcessInfo.processInfo.processIdentifier,
+                  config.systemInterval, config.quotaInterval,
+                  Bundle.main.bundleIdentifier ?? "无 bundle id"))
         NSApp.setActivationPolicy(.regular)
         let menu = NSMenu(), appItem = NSMenuItem(), submenu = NSMenu()
         submenu.addItem(withTitle: "设置…", action: #selector(openSettings), keyEquivalent: ",")
@@ -832,11 +846,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.contentView?.addSubview(button)
         let center = NSWorkspace.shared.notificationCenter
         observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.sleeping = true; self?.timers.forEach { $0.invalidate() }; self?.queue.cancelAllOperations()
-            self?.stopAnimation()
+            guard let self else { return }
+            self.log("willSleep 触发：停表 \(self.timers.count) 个、取消在途查询 \(self.queue.operationCount) 个")
+            self.sleeping = true; self.timers.forEach { $0.invalidate() }; self.queue.cancelAllOperations()
+            self.stopAnimation()
         })
         observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            guard let self else { return }; self.sleeping = false; self.sampler.reset(); self.startTimers(); self.tick(); self.refresh()
+            guard let self else { return }
+            // 先探针再 reset：这里要回答的是「reset() 到底有没有必要」。
+            // reset() 的注释写着「否则跨越睡眠的那段会被算成一个巨大的速率」，
+            // 那是推断。probeBaseline() 把「假设不 reset」的数字取出来，让结论
+            // 能指回一次真实执行——参见 AGENTS.md 验证纪律第 9 条。
+            if let p = self.sampler.probeBaseline() {
+                let cpu = p.cpu.map { String(format: "%.1f%%", $0 * 100) } ?? "无"
+                let readBps = p.uptimeElapsed > 0
+                    ? String(format: "%.0f MB/s", Double(p.pageInsDelta) * 4096 / p.uptimeElapsed / 1_048_576)
+                    : "除零"
+                self.log(String(format: "didWake 触发：距上次采样 wall %.1fs / uptime %.1fs",
+                                p.wallElapsed, p.uptimeElapsed))
+                self.log("  若不 reset：CPU \(cpu)、磁盘读 \(readBps)（pageins +\(p.pageInsDelta)）")
+                self.log("  uptime 是否跨睡眠增长：" + Self.uptimeVerdict(p.uptimeElapsed, p.wallElapsed))
+            } else {
+                self.log("didWake 触发：无上次采样基准可探（首次采样前？）")
+            }
+            self.sleeping = false; self.sampler.reset(); self.startTimers(); self.tick(); self.refresh()
         })
         startTimers(); tick(); refresh()
         window.center(); window.makeKeyAndOrderFront(nil)
@@ -941,9 +974,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func log(_ message: String) {
-        FileHandle.standardError.write("MP \(message)\n".data(using: .utf8)!)
-    }
+    private static let processStart = Date()
+
+        /// 判断 `systemUptime` 有没有跟上墙钟。
+        ///
+        /// 只能看**比值**。第一版判据写的是「uptime 动了 1 秒就算增长」，
+        /// 结果实测 64.5s vs 1170.7s（5.5%）也报了「是」——判据写成绝对值就
+        /// 必然误判。凡是「有没有跟上」这类判断，先想清楚量纲。
+        ///
+        /// 实测两次（2026-10-07，Clamshell Sleep）：
+        /// 776s 墙钟 → 181.7s uptime（23%）；1170.7s → 64.5s（5.5%）。
+        /// 结论：只在 CPU 真正运行时推进，用它当时间分母会严重偏小。
+        static func uptimeVerdict(_ uptime: TimeInterval, _ wall: TimeInterval) -> String {
+            guard wall > 10 else { return "睡眠时间过短，不判定" }
+            let ratio = uptime / wall
+            let verdict = ratio > 0.8 ? "是（基本跟上）"
+                : ratio > 0.5 ? "部分（\(Int(ratio * 100))%）"
+                : "否（仅 \(Int(ratio * 100))%，用作时间分母会严重偏小）"
+            return "\(verdict)，uptime \(String(format: "%.1f", uptime))s / wall \(String(format: "%.1f", wall))s"
+        }
+        private func log(_ message: String) {
+            let elapsed = Date().timeIntervalSince(Self.processStart)
+            FileHandle.standardError.write("MP [+\(String(format: "%.1f", elapsed))s] \(message)\n".data(using: .utf8)!)
+            // 同时写 sidecar：从 Dock / 登录项启动的进程 stderr 接不到，
+            // 只写 stderr 会把 willSleep/didWake 这类证据全丢掉。
+            guard let path = ProcessInfo.processInfo.environment["MP_SAMPLE_LOG"] else { return }
+            let line = "EVENT +\(String(format: "%.1f", elapsed))s \(message)\n"
+            let url = URL(fileURLWithPath: path + ".events")
+            // FileHandle(forWritingTo:) 只能打开**已存在**的文件，文件不存在时抛错。
+            // 之前没先创建，异常被 try? 吞掉，结果 events 一个字节都没有——
+            // 而那正是 willSleep/didWake 唯一的证据来源，丢了就等于没测。
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            if let handle = try? FileHandle(forWritingTo: url) {
+                handle.seekToEndOfFile()
+                handle.write(line.data(using: .utf8)!)
+                try? handle.close()
+            } else {
+                NSLog("MP sidecar 打开失败，事件将丢失: %@", url.path)
+            }
+        }
 
     /// 逐次采样落盘，供事后分析趋势。
     ///

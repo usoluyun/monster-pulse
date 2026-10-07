@@ -329,6 +329,7 @@ final class SystemSampler {
             previousPageIns = UInt64(vm.pageins)
             previousPageOuts = UInt64(vm.pageouts)
             previousPageSample = now
+            lastSampleWall = Date()
         }
 
         reading.swapUsedBytes = Self.swapUsedBytes()
@@ -346,12 +347,75 @@ final class SystemSampler {
         return Double(usage.xsu_used)
     }
 
-    /// 唤醒后调用：清空全部差值基准，否则跨越睡眠的那段会被算成一个巨大的速率。
+    /// 唤醒后调用：清空全部差值基准。
+    ///
+    /// 原注释写「否则跨越睡眠的那段会被算成一个巨大的速率」——**这是推断，
+    /// 已被实测推翻**。2026-10-07 真机睡眠 1170.7s 实测「若不 reset」的值：
+    ///
+    /// | 指标 | 若不 reset | 实际含义 |
+    /// | CPU | 17.8% | 看着完全正常，实际把 64.5s 的 tick 摊到 19.5 分钟区间上 |
+    /// | 磁盘读 | 0 MB/s | pageins 涨 1873 页(7.7MB)，被抹成 0，低估约 18 倍 |
+    ///
+    /// 两个方向都不是「巨大」，而是**貌似合理的错值**。CPU 那个 17.8% 最危险——
+    /// 没有任何异常特征，人根本看不出它错。所以 reset() 的价值是「不给错值」，
+    /// 不是「防爆表」。
+    ///
+    /// 根因是 `systemUptime` 只在 CPU 真正运行时推进：墙钟 1170.7s 它只走了
+    /// 64.5s（5.5%）。拿它当时间分母，在跨睡眠的区间上必然偏小。
     func reset() {
         previous = nil
         previousPageIns = nil
         previousPageOuts = nil
         previousPageSample = nil
+    }
+
+    /// 诊断用：若**不**重置基准，下一次采样会算出什么。只读，不消费基准。
+    ///
+    /// `reset()` 的注释说「否则跨越睡眠的那段会被算成一个巨大的速率」，这句话
+    /// 是推断的，从未实测。这里把「假设不 reset」的数字取出来，让它能被证伪：
+    ///
+    /// - CPU 是 tick 比值。睡眠期间 CPU 停转，分子分母都很小，比值可能剧烈抖动，
+    ///   也可能看起来正常——**两种都要靠实测区分，不能猜**。
+    /// - 磁盘速率更危险：若 `systemUptime` 跨睡眠几乎不走，`elapsed` 趋近 0，
+    ///   而 `pageins` 增量有值，除出来会是天文数字。
+    /// - 顺带返回 `uptimeElapsed` 与 `wallElapsed`，用来判定 `systemUptime`
+    ///   到底会不会跨睡眠增长——这是上面那个除零风险的前提，同样没实测过。
+    func probeBaseline() -> (cpu: Double?, uptimeElapsed: TimeInterval,
+                             wallElapsed: TimeInterval, pageInsDelta: UInt64)? {
+        guard let oldIn = previousPageIns, let oldAt = previousPageSample else { return nil }
+        var vm = vm_statistics64()
+        var vmCount = mach_msg_type_number_t(MemoryLayout<vm_statistics64>.size / MemoryLayout<integer_t>.size)
+        let vmStatus = withUnsafeMutablePointer(to: &vm) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(vmCount)) {
+                host_statistics64(host, HOST_VM_INFO64, $0, &vmCount)
+            }
+        }
+        guard vmStatus == KERN_SUCCESS else { return nil }
+        return (cpu: wouldBeCPUPercent(),
+                uptimeElapsed: ProcessInfo.processInfo.systemUptime - oldAt,
+                wallElapsed: Date().timeIntervalSince(lastSampleWall),
+                pageInsDelta: UInt64(vm.pageins) &- oldIn)
+    }
+
+    /// 探针配套：记录上次采样时的墙钟时间。`systemUptime` 跨睡眠是否增长未知，
+    /// 两者一起看才有对照。
+    private var lastSampleWall = Date()
+
+    private func wouldBeCPUPercent() -> Double? {
+        guard let old = previous else { return nil }
+        var cpu = host_cpu_load_info()
+        var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info>.size / MemoryLayout<integer_t>.size)
+        let status = withUnsafeMutablePointer(to: &cpu) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics(host, HOST_CPU_LOAD_INFO, $0, &count)
+            }
+        }
+        guard status == KERN_SUCCESS else { return nil }
+        let ticks = [cpu.cpu_ticks.0, cpu.cpu_ticks.1, cpu.cpu_ticks.2, cpu.cpu_ticks.3]
+        let delta = zip(ticks, old).map { Double($0 &- $1) }
+        let total = delta.reduce(0, +)
+        guard total > 0 else { return nil }
+        return (total - delta[Int(CPU_STATE_IDLE)]) / total
     }
 }
 

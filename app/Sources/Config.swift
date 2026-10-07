@@ -668,6 +668,20 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             content.appearance = appearance
             window.appearance = appearance
         }
+        // 必须自己垫一层窗口背景色。
+        //
+        // contentView 是 wantsLayer 且没有自己的底色，直接 cacheDisplay 得到的
+        // 位图背景是**透明**的。真实窗口里看不出来——窗口自己垫了
+        // windowBackgroundColor；离屏渲染没有窗口，就成了「白字 + 透明底」，
+        // 文字整个消失（DetailsView 在 draw() 里自己填了底色，所以它没事）。
+        //
+        // 这个坑被另一个 bug 掩盖了很久：renderAppearance 原先声明在使用之后，
+        // 设置面板那次读到的是 nil，appearance 没生效、文字按系统外观成了深色，
+        // 深字配透明底反而「能看见」。修掉前向引用后深色没了，它才暴露出来。
+        //
+        // 必须在设完 appearance 之后再取 cgColor，否则动态色会按当时的当前外观
+        // 解析，而不是 darkAqua——那就等于白垫。
+        content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         // 夹具是在 init 之后才注入的（renderLaunchAtLoginOverride / renderAppearance），
         // 而 refreshControls() 在 buildRows() 里已经跑过一次。不重刷就等于用注入前
         // 的状态出图——login-on 夹具会画出「未启用」，看起来像功能没实现。
