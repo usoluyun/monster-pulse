@@ -533,7 +533,11 @@ if CommandLine.arguments.contains("--dock-menu-dump") {
     print("state=\(state)")
     for item in menu.items {
         let title = item.isSeparatorItem ? "--" : item.title
-        print("\(item.isEnabled ? "enabled" : "disabled")\t\(title)")
+        // 把 action 选择器一并打出来，人工点验时能对照「这一项该触发什么」，
+        // 而不是只能看标题对不对。Dock 菜单的 target/action 不由系统分发，
+        // 实际会走到哪个方法是这次点验最需要确认的东西。
+        let action = item.action.map { NSStringFromSelector($0) } ?? "-"
+        print("\(item.isEnabled ? "enabled" : "disabled")\t\(title)\t\(action)")
     }
     exit(0)
 }
