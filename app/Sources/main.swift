@@ -121,15 +121,15 @@ func verify() throws {
     }
 
     checkMenu(AppDelegate.buildDockMenu(target: menuTarget, quota: demoQuota, stale: false,
-                                        loading: false, errorText: nil, cpu: 0.42, memory: 0.61,
+                                        loading: false, errorText: nil, cpu: 0.42, gpu: 0.30, memory: 0.61,
                                         now: menuNow),
               "正常状态",
               enabledTitles: ["立即刷新额度", "打开详情", "退出 Monster Pulse"],
-              disabledTitles: ["5 小时窗口　剩余 92%", "CPU　42%", "内存　61%"])
+              disabledTitles: ["5 小时窗口　剩余 92%", "CPU　42%", "GPU　30%", "内存　61%"])
     // 查询进行中必须禁用刷新：对应 refresh() 的 !loading 守卫，
     // 避免用户连点叠加查询
     checkMenu(AppDelegate.buildDockMenu(target: menuTarget, quota: demoQuota, stale: false,
-                                        loading: true, errorText: nil, cpu: 0.42, memory: 0.61,
+                                        loading: true, errorText: nil, cpu: 0.42, gpu: 0.30, memory: 0.61,
                                         now: menuNow),
               "加载中",
               enabledTitles: ["打开详情", "退出 Monster Pulse"],
@@ -137,7 +137,7 @@ func verify() throws {
     // 无数据时不能出现「旧数据，仅供参考」——没有快照就说旧数据不成立
     let noDataTitles = AppDelegate.buildDockMenu(target: menuTarget, quota: nil, stale: true,
                                                  loading: false, errorText: "查询失败",
-                                                 cpu: nil, memory: nil, now: menuNow)
+                                                 cpu: nil, gpu: nil, memory: nil, now: menuNow)
         .items.map(\.title)
     for bogus in ["旧数据，仅供参考", "5 小时窗口　剩余 92%"] where noDataTitles.contains(bogus) {
         failures.append("无数据状态不应出现「\(bogus)」")
@@ -390,7 +390,8 @@ if CommandLine.arguments.contains("--draw-bench") {
     // Dock 图标走 dockTile 离屏渲染，没有 GPU 合成可借力——每帧都要 CPU 重画，
     // 所以单帧成本 × 帧率就是动效的额外 CPU 预算。
     let view = DockView(frame: NSRect(x: 0, y: 0, width: 128, height: 128))
-    view.remaining = 92; view.cpu = 0.42; view.memory = 0.61
+    view.remaining = 92; view.cpu = 0.42; view.gpu = 0.3
+    view.rails = [DockView.Rail(used: 0.38, elapsed: 0.45)]
     let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
     func timeIt(_ label: String, _ n: Int) {
         // 预热，避免把首帧的一次性开销算进稳态
@@ -429,18 +430,22 @@ if CommandLine.arguments.contains("--render-test") {
     // 「没有数字时不该标 OLD」这条分支
     view.remaining = args.count > 1 ? (args[1] == "nil" ? nil : Int(args[1])) : 92
     view.cpu = args.count > 2 ? Double(args[2]) : 0.42
-    view.memory = args.count > 3 ? Double(args[3]) : 0.61
-    view.stale = args.count > 4 ? args[4] == "stale" : false
-    // 第 6 个参数可选，控制 CPU/内存条的显示，用于覆盖配置关掉指标后的图标外观。
-    // 取值 both / no-cpu / no-mem / no-both。
-    if args.count > 5 {
-        let meters = args[5]
-        view.showCPU = meters != "no-cpu" && meters != "no-both"
-        view.showMemory = meters != "no-mem" && meters != "no-both"
+    // 第 4 位两代语法：旧的是 memory（数字），新的是 stale/none。识别到数字就
+    // 按旧语法跳位——旧脚本不至于全坏，新脚本用新位置。
+    let fourth = args.count > 3 ? args[3] : "none"
+    let legacy = Double(fourth) != nil
+    view.stale = legacy ? (args.count > 4 && args[4] == "stale")
+                        : (fourth == "stale")
+    let metersSlot = legacy ? 5 : (fourth == "stale" ? 5 : 4)
+    if args.count > metersSlot {
+        let meters = args[metersSlot]
+        view.showCPU = meters != "no-cpu" && meters != "no-both" && meters != "no-gpu"
+        view.showGPU = meters != "no-gpu" && meters != "no-both"
     }
-    // 第 7 个参数可选：pace=已过比例 / activity=亮点相位。用于把动效的
-    // 各分支纳入视觉回归——默认不画，保证既有基准图不受影响。
-    let extras = args.count > 6 ? args[6].split(separator: ",").map(String.init) : []
+    // extras：activity=亮点相位 / gpu=占用 / rail=<used>/<elapsed>（主窗口轨）/
+    // rail2=<used>/<elapsed>（周窗口轨）。elapsed 传 -1 表示无时间信息。
+    let extrasSlot = metersSlot + 1
+    let extras = args.count > extrasSlot ? args[extrasSlot].split(separator: ",").map(String.init) : []
     for extra in extras {
         // maxSplits=1 且允许没有 "="：无值开关（nogpu / nogpumeter）和
         // 带值参数（gpu=0.5）要分开处理。原先用 `guard parts.count == 2` 一刀切，
@@ -451,15 +456,27 @@ if CommandLine.arguments.contains("--render-test") {
         let key = parts[0]
         if key == "nogpu" { view.gpu = nil; continue }
         if key == "nogpumeter" { view.showGPU = false; continue }
+        if key == "rail" || key == "rail2" {
+            // rail 的值是 "used/elapsed" 复合形式，不走通用数值解析
+            let pieces = parts[1].split(separator: "/").compactMap(Double.init)
+            guard pieces.count == 2 else { continue }
+            let rail = DockView.Rail(used: min(1, max(0, pieces[0])),
+                                     elapsed: pieces[1] < 0 ? nil : min(1, max(0, pieces[1])))
+            if key == "rail" {
+                view.rails = [rail]
+            } else if !view.rails.isEmpty {
+                view.rails.append(rail)
+            }
+            continue
+        }
         guard parts.count == 2, let value = Double(parts[1]) else { continue }
-        if key == "pace" { view.paceMarker = value }
         if key == "activity" { view.activity = value; view.pulse = value }
         if key == "gpu" { view.gpu = value }
     }
     let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
     view.cacheDisplay(in: view.bounds, to: bitmap)
     try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
-    print("wrote \(out) remaining=\(view.remaining ?? -1) cpu=\(view.cpu ?? -1) memory=\(view.memory ?? -1) stale=\(view.stale)")
+    print("wrote \(out) remaining=\(view.remaining ?? -1) cpu=\(view.cpu ?? -1) gpu=\(view.gpu ?? -1) stale=\(view.stale) rails=\(view.rails.count)")
     exit(0)
 }
 if CommandLine.arguments.contains("--settings-render-test") {
@@ -538,20 +555,20 @@ if CommandLine.arguments.contains("--dock-menu-dump") {
     switch state {
     case "no-data":  menu = AppDelegate.buildDockMenu(target: target, quota: nil, stale: false,
                                                      loading: false, errorText: nil,
-                                                     cpu: 0.42, memory: 0.61, now: now)
+                                                     cpu: 0.42, gpu: 0.30, memory: 0.61, now: now)
     case "stale":     menu = AppDelegate.buildDockMenu(target: target, quota: demo, stale: true,
                                                      loading: false, errorText: nil,
-                                                     cpu: 0.42, memory: 0.61, now: now)
+                                                     cpu: 0.42, gpu: 0.30, memory: 0.61, now: now)
     case "error":     menu = AppDelegate.buildDockMenu(target: target, quota: nil, stale: true,
                                                      loading: false,
                                                      errorText: "Codex 查询超时或进程退出；请检查 CLI 登录状态和网络",
-                                                     cpu: 0.42, memory: 0.61, now: now)
+                                                     cpu: 0.42, gpu: 0.30, memory: 0.61, now: now)
     case "loading":   menu = AppDelegate.buildDockMenu(target: target, quota: demo, stale: false,
                                                      loading: true, errorText: nil,
-                                                     cpu: 0.42, memory: 0.61, now: now)
+                                                     cpu: 0.42, gpu: 0.30, memory: 0.61, now: now)
     default:          menu = AppDelegate.buildDockMenu(target: target, quota: demo, stale: false,
                                                      loading: false, errorText: nil,
-                                                     cpu: 0.42, memory: 0.61, now: now)
+                                                     cpu: 0.42, gpu: 0.30, memory: 0.61, now: now)
     }
     defer { _ = target }
     print("state=\(state)")
@@ -667,18 +684,22 @@ if CommandLine.arguments.contains("--probe") {
 
 final class DockView: NSView {
     var remaining: Int?
+    /// 一条额度轨。两条轨（5 小时窗口 / 周窗口）用同一套画法，语义统一。
+    struct Rail {
+        /// 已用比例（0...1），画成填充长度——这是「用量」这个量本身。
+        var used: Double
+        /// 窗口时间已过的比例（0...1），画成一道竖刻度。
+        var elapsed: Double?
+    }
     var cpu: Double?
     /// GPU 占用（0...1）。跑本地大模型时这是判断「机器在不在算」的唯一指标，
     /// 所以进了 Dock 图标而不是只留在详情窗口。
     var gpu: Double?
-    var memory: Double?
     var stale = false
     var showCPU = true
     var showGPU = true
-    var showMemory = true
-    /// 额度窗口已过的时间比例（0...1），在额度条上标为一道 1pt 亮线。
-    /// 与填充长度对比即可看出用量是超前还是落后于时间进度。
-    var paceMarker: Double?
+    /// 额度轨：[0] = 5 小时主窗口，[1] = 周窗口。缺失的窗口不画。
+    var rails: [Rail] = []
     /// CPU 忙碌度（0...1），驱动条内亮点的脉动。nil 表示无读数。
     ///
     /// 注意这个值的时效性：host_statistics 的 CPU tick 计数器约每秒才更新一次
@@ -692,6 +713,18 @@ final class DockView: NSView {
     // Dock 图标走 dockTile 离屏渲染，没有 GPU 合成可借力，每次 display 都要 CPU 重画。
     // 静态部分（背景、进度条底槽）与数字文字的排版是主要开销——后者每次都要重跑
     // 段落布局。预渲染成位图后重绘只剩位图拷贝，为后续低帧率动效腾出预算。
+    /// 低于此占用视为「闲着」，不画闪点、也不启动动画定时器。
+    static let busyThreshold = 0.02
+    /// 方波闪烁。`pulse` 每秒推进 1.0，这里取占空比约 45% 的一格。
+    ///
+    /// 刻意用方波而不是正弦淡入淡出：小尺寸下平滑渐变读起来是「缓慢呼吸」，
+    /// 而「在闪 / 不闪」这个二元对比才是一眼能分辨的状态。
+    static func blinkAlpha(_ pulse: Double) -> CGFloat {
+        let phase = (pulse.truncatingRemainder(dividingBy: 1) + 1)
+            .truncatingRemainder(dividingBy: 1)
+        return phase < 0.45 ? 1.0 : 0.15
+    }
+
     private static let paragraph: NSParagraphStyle = {
         let style = NSMutableParagraphStyle()
         style.alignment = .center
@@ -701,6 +734,7 @@ final class DockView: NSView {
     private var backdrop: NSImage?
     private var backdropStale = false
     private var backdropSize: CGSize = .zero
+    private var backdropRails = 0
     private var glyphs: [String: NSImage] = [:]
     /// glyph 缓存的条目上限。字典本身没有上界：额度百分比会随时间变化，
     /// 每个新值都是一条新 key。实测单条 glyph 位图约 76 KB（120×41 @2x），
@@ -728,22 +762,38 @@ final class DockView: NSView {
         image.draw(in: NSRect(x: 4, y: y, width: 120, height: size + 9))
     }
 
-    /// 计量条槽位数。CPU / GPU / 内存各占一个固定槽位。
+    /// 计量条槽位数。CPU / GPU 各占一个固定槽位。
     ///
-    /// 间距从两根时的 13 收到 10，是为了让第三根落在底边上沿之内
-    /// （圆角背板 inset 5，最后一根底边 12，留 7pt）。代价是每根只有 6pt 高。
-    static let meterSlots = 3
-    private static let meterHeight: CGFloat = 6
-    private static let meterPitch: CGFloat = 10
-    private static func meterRect(slot: Int) -> NSRect {
-        NSRect(x: 19, y: 32 - CGFloat(slot) * Self.meterPitch,
+    /// 内存从图标里去掉了（用户判断它不重要），所以槽位从 3 回到 2，
+    /// 每根得以回到 7pt 高——加 GPU 那次为了塞下第三根压到了 6pt。
+    static let meterSlots = 2
+    static let meterHeight: CGFloat = 7
+    private static let meterPitch: CGFloat = 11
+    static func meterRect(slot: Int) -> NSRect {
+        NSRect(x: 19, y: 25 - CGFloat(slot) * Self.meterPitch,
                width: 90, height: Self.meterHeight)
+    }
+
+    /// 额度轨几何。两条轨紧贴大数字下方，视觉上归属「额度」，
+    /// 与下方彩色计量条（机器负载）明确分组。
+    static let railWidth: CGFloat = 90
+    static let railX: CGFloat = 19
+    static let railHeight: CGFloat = 3
+    static func railRect(_ index: Int) -> NSRect {
+        NSRect(x: railX, y: 42 - CGFloat(index) * 6, width: railWidth, height: railHeight)
     }
 
     private func makeBackdrop() -> NSImage {
         NSImage(size: bounds.size, flipped: false) { rect in
             NSColor(calibratedWhite: 0.10, alpha: 1).setFill()
             NSBezierPath(roundedRect: rect.insetBy(dx: 5, dy: 5), xRadius: 24, yRadius: 24).fill()
+            NSColor(calibratedWhite: 0.24, alpha: 1).setFill()
+            // 背板按当前 rails 数画底槽。rails 变化会让 backdrop 失效重建
+            // （backdropRails 记着上次画了几条），所以这里捕获的必然是最新的。
+            for index in 0..<self.rails.count {
+                let rail = DockView.railRect(index)
+                NSBezierPath(roundedRect: rail, xRadius: 1.5, yRadius: 1.5).fill()
+            }
             NSColor.darkGray.setFill()
             for slot in 0..<DockView.meterSlots {
                 let bar = DockView.meterRect(slot: slot)
@@ -754,10 +804,12 @@ final class DockView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        if backdrop == nil || backdropStale != stale || backdropSize != bounds.size {
+        if backdrop == nil || backdropStale != stale || backdropSize != bounds.size
+            || backdropRails != rails.count {
             backdrop = makeBackdrop()
             backdropStale = stale
             backdropSize = bounds.size
+            backdropRails = rails.count
         }
         backdrop?.draw(in: bounds)
 
@@ -775,7 +827,6 @@ final class DockView: NSView {
         let meters: [(value: Double?, shown: Bool, slot: Int, color: NSColor)] = [
             (cpu, showCPU, 0, .systemTeal),
             (gpu, showGPU, 1, .systemGreen),
-            (memory, showMemory, 2, .systemPurple),
         ]
         for meter in meters {
             guard meter.shown, let value = meter.value else { continue }
@@ -786,33 +837,57 @@ final class DockView: NSView {
                 width: fillWidth, height: rect.height),
                          xRadius: 3, yRadius: 3).fill()
 
-            // CPU 条内的亮点：在已填充部分内来回流动，速度 ∝ 忙碌度。
-            // 忙碌度接近 0 时不画——此时定时器也不运行，静止期零开销。
-            if meter.slot == 0, let act = activity, act > 0.02 {
-                let travel = max(0, fillWidth - 6)
-                let x = rect.minX + travel * pulse
-                let alpha = 0.35 + 0.65 * min(1, act)
-                NSColor.white.withAlphaComponent(alpha).setFill()
-                NSBezierPath(ovalIn: NSRect(x: x, y: rect.minY - 1.5,
-                                            width: 4, height: rect.height + 3)).fill()
-            }
+            // 繁忙闪点。**用闪烁而不是移动**表达「正在忙」。
+            //
+            // 上一版是让亮点沿已填充部分来回移动，速度 ∝ 忙碌度。实测两个问题：
+            // 一是 CPU tick 约 1Hz 更新，这个值本来就是 1 秒粒度的读数，
+            // 把「移动快慢」映射到它身上没有信息量；二是 43pt 下亮点只有 4×10pt，
+            // 来回移动几乎察觉不到，只剩一个模糊的抖动。
+            //
+            // 改成方波闪烁后语义变成单一维度：**在闪 = 这条指标对应的资源正在忙**。
+            // 频率由 UI 节奏决定（pulse 每秒一个周期），不承载数据含义——
+            // 闪烁频率不是「忙的程度」，只是「在忙」这一状态本身。
+            //
+            // 忙碌度接近 0 时完全不画，同时动画定时器也不启动，静止期零开销。
+            guard value > Self.busyThreshold else { continue }
+            let dot = NSRect(x: rect.minX + max(0, fillWidth - 5), y: rect.minY - 1,
+                             width: 5, height: rect.height + 2)
+            NSColor.white.withAlphaComponent(Self.blinkAlpha(pulse)).setFill()
+            NSBezierPath(ovalIn: dot).fill()
         }
 
-        // 额度的时间进度轨。必须画在数字正下方而不是任何一条指标条上——
-        // Dock 图标里额度是用大字表示的、没有独立进度条，标在 CPU 条上会让人
-        // 误以为它和 CPU 有关。位置紧贴数值，视觉归属才明确。
+        // 额度轨（5 小时 + 周）。画法是标准 bullet graph：
         //
-        // 轨上已走过的一段表示「窗口时间已过去的比例」，与下方额度填充长度
-        // （剩余百分比）不在同一个量上，这里只表达时间。
-        if let pace = paceMarker {
-            let clamped = min(1, max(0, pace))
-            let rail = NSRect(x: 19, y: 42, width: 90, height: 2)
-            NSColor(calibratedWhite: 0.30, alpha: 1).setFill()
-            NSBezierPath(roundedRect: rail, xRadius: 1, yRadius: 1).fill()
-            NSColor.white.withAlphaComponent(0.75).setFill()
-            NSBezierPath(roundedRect: NSRect(x: rail.minX, y: rail.minY,
-                                             width: rail.width * clamped, height: 2),
-                         xRadius: 1, yRadius: 1).fill()
+        //   填充长度 = 已用百分比   ← 「用量」这个量本身，能直接读
+        //   竖刻度   = 时间已过百分比 ← 同一量纲上的参照
+        //
+        // 于是「消耗繁忙度」不用另设一个指标表达，直接看刻度落在填充的哪一侧：
+        // 刻度在填充右边 = 用掉的比时间多 = 烧得比线性快。领先超过 5 个百分点
+        // 整条轨转琥珀色。
+        //
+        // 之前只画「时间已过」一段、且只有一条轨，与下方彩色计量条挨得太近，
+        // 43pt 下容易被当成第四条机器指标。现在两条轨同画法、同位置（紧贴大数字），
+        // 与彩色条形成明确的「额度 / 负载」两组。
+        for (index, rail) in rails.enumerated() {
+            let rect = Self.railRect(index)
+            let used = min(1, max(0, rail.used))
+            let burning = rail.elapsed.map { used > $0 + 0.05 } ?? false
+            let fill = burning
+                ? NSColor.systemOrange
+                : NSColor(calibratedWhite: 0.92, alpha: 1)
+            fill.setFill()
+            NSBezierPath(roundedRect: NSRect(x: rect.minX, y: rect.minY,
+                                             width: rect.width * used, height: rect.height),
+                         xRadius: 1.5, yRadius: 1.5).fill()
+            // 刻度画在填充之上，并上下各伸出 2pt，小尺寸下才看得出是「标记」而不是
+            // 又一段填充。宽度取 3pt：2pt 在 43pt 下只有 0.6px。
+            if let elapsed = rail.elapsed {
+                let x = rect.minX + rect.width * min(1, max(0, elapsed)) - 1.5
+                NSColor(calibratedWhite: 1, alpha: 1).setFill()
+                NSBezierPath(roundedRect: NSRect(x: x, y: rect.minY - 2,
+                                                 width: 3, height: rect.height + 4),
+                             xRadius: 1.5, yRadius: 1.5).fill()
+            }
         }
     }
 }
@@ -954,18 +1029,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func tick() {
         guard !sleeping else { return }
         let data = sampler.sample()
-        dock.cpu = data.cpu; dock.gpu = data.gpu?.deviceUtilization; dock.memory = data.memoryFraction
-        dock.activity = config.showCPU ? data.cpu : nil
+        dock.cpu = data.cpu; dock.gpu = data.gpu?.deviceUtilization
+        dock.activity = max(data.cpu ?? 0, data.gpu?.deviceUtilization ?? 0)
         system = data
         logSample(data)
-        // 时间进度参考线只跟主窗口（Dock 显示的那个）。参考线随时间缓慢右移：
-        // 300 分钟窗口下每 5 秒约 0.28%，在 90pt 宽的条上是 0.25pt，肉眼不可见，
-        // 所以不需要额外的动画定时器来推进它。
-        if let first = quota?.windows.first, let resetsAt = first.resetsAt,
-           let minutes = first.minutes {
-            dock.paceMarker = QuotaFormat.windowProgress(resetsAt: resetsAt, windowMinutes: minutes)
-        } else {
-            dock.paceMarker = nil
+        // 额度轨：每条窗口一条，按 5 小时 → 周的顺序。用量与时间进度都来自
+        // 同一次额度查询，画法见 DockView.draw 里的 bullet graph 注释。
+        // 参考线随时间缓慢右移：300 分钟窗口下每 5 秒约 0.28%，在 90pt 宽的
+        // 条上是 0.25pt，肉眼不可见，所以不需要动画定时器推进它。
+        dock.rails = (quota?.windows ?? []).map { window in
+            DockView.Rail(
+                used: window.used / 100,
+                elapsed: (window.resetsAt.flatMap { reset in
+                    window.minutes.map { QuotaFormat.windowProgress(resetsAt: reset, windowMinutes: $0) }
+                }) ?? nil)
         }
         render()
         updateAnimation()
@@ -977,9 +1054,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 定时器直接不存在（不是「存在但空转」），此时应用的周期性开销只有
     /// 系统指标采样与额度轮询本身。
     func updateAnimation() {
-        // 0.02 以下视为静止：此时亮点只在 0.25pt 范围内移动，看不出来，
-        // 却要付出每 100ms 一次 dockTile 上传与 WindowServer 合成，不划算。
-        let animated = config.showCPU && (dock.activity ?? 0) > 0.02
+        // 0.02 以下视为静止：此时闪点不存在，却要付出每 100ms 一次 dockTile
+        // 上传与 WindowServer 合成，不划算。CPU 与 GPU 任一超过阈值就启动：
+        // 两条计量条各有一个闪点，任一在闪都算「在忙」。
+        let animated = (config.showCPU && (dock.cpu ?? 0) > DockView.busyThreshold)
+            || (config.showGPU && (dock.gpu ?? 0) > DockView.busyThreshold)
         if animated {
             if animationTimer == nil {
                 let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
@@ -991,7 +1070,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // 动效是否真的在运行，直接关系到性能测量的结论是否成立
                 // （不运行就测不到 dockTile 上传与 WindowServer 合成的开销）。
                 // 打印出来让性能脚本事后能核对，不靠假设。
-                log("anim start activity=\(dock.activity ?? 0)")
+                log(String(format: "anim start cpu=%.3f gpu=%.3f", dock.cpu ?? 0, dock.gpu ?? 0))
             }
         } else {
             if animationTimer != nil { log("anim stop") }
@@ -1075,16 +1154,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         handle.write(line.data(using: .utf8)!)
     }
 
-    /// 推进亮点相位并重绘 Dock 图标。
+    /// 推进闪烁相位并重绘 Dock 图标。
+    ///
+    /// 闪烁只表达「在忙」这一状态，不承载程度信息，所以相位**匀速推进**——
+    /// 上一版「忙碌度越高移动越快」的变速逻辑随移动亮点一起淘汰了。
+    /// 每步 0.1，即 1 秒一个完整闪烁周期。
     ///
     /// 这里的 `dockTile.display()` 绕过了 render() 的 lastDockState 去重判断——
     /// 那是刻意的：去重是为了避免 5 秒采样时重复重绘，而动效每 100ms 一次、
     /// 相位每次都变，本来就不该走去重路径。
     func animationStep() {
-        guard let activity = dock.activity else { return }
-        // 忙碌度越高走越快：低负载约 2.5s 一个来回，高负载约 0.33s
-        let speed = 0.3 + 2.7 * min(1, max(0, activity))
-        dock.pulse += 0.1 * speed
+        dock.pulse += 0.1
         if dock.pulse > 1 { dock.pulse -= floor(dock.pulse) }
         NSApp.dockTile.display()
     }
@@ -1138,12 +1218,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                   || (updated.map { Date().timeIntervalSince($0) > 300 } ?? false))
         dock.showCPU = config.showCPU
         dock.showGPU = config.showGPU
-        dock.showMemory = config.showMemory
         // 开关必须计入状态串：否则用户关掉 CPU 后图标内容变了却不会重绘
-        let pace = dock.paceMarker.map { String(format: "%.3f", $0) } ?? "-"
+        let pace = dock.rails.first.flatMap { $0.elapsed }.map { String(format: "%.3f", $0) } ?? "-"
         let activity = dock.activity.map { String(format: "%.3f", $0) } ?? "-"
-        let dockState = "\(dock.remaining ?? -1):\(dock.stale):\(config.showCPU):\(config.showMemory):"
-            + "\(Int((dock.cpu ?? -1) * 100)):\(Int((dock.memory ?? -1) * 100)):\(pace):\(activity)"
+        let railsSignature = dock.rails.map { String(format: "%.3f/%.3f", $0.used, $0.elapsed ?? -1) }
+            .joined(separator: ",")
+        let dockState = "\(dock.remaining ?? -1):\(dock.stale):\(config.showCPU):\(config.showGPU):"
+            + "\(Int((dock.cpu ?? -1) * 100)):\(Int((dock.gpu ?? -1) * 100)):\(railsSignature):\(activity)"
         if dockState != lastDockState { NSApp.dockTile.display(); lastDockState = dockState }
         details.update(
             windows: (quota?.windows ?? []).map { value in
@@ -1176,10 +1257,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Dock 菜单（右键 Dock 图标）
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        // 菜单仍显示内存（用户偶尔要查），但 DockView 不再持有它——
+        // 数据直接从系统采样拿，不经过图标视图转一手。
         Self.buildDockMenu(target: self, quota: quota, stale: dock.stale,
                            loading: loading, errorText: errorText,
-                           cpu: dock.cpu, memory: dock.memory,
-                           showCPU: config.showCPU, showMemory: config.showMemory)
+                           cpu: dock.cpu, gpu: dock.gpu,
+                           memory: system.memoryFraction,
+                           showCPU: config.showCPU, showGPU: config.showGPU,
+                           showMemory: config.showMemory)
     }
 
     /// 构造 Dock 菜单。抽成不依赖 `NSApplication` 实例的静态函数，
@@ -1187,8 +1272,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 右键才弹得出来，没法注入，但「有哪些项、哪些被禁用、文案是否如实」
     /// 是可以断言的。
     static func buildDockMenu(target: AnyObject, quota: Quota?, stale: Bool, loading: Bool,
-                              errorText: String?, cpu: Double?, memory: Double?,
-                              showCPU: Bool = true, showMemory: Bool = true,
+                              errorText: String?, cpu: Double?, gpu: Double?, memory: Double?,
+                              showCPU: Bool = true, showGPU: Bool = true, showMemory: Bool = true,
                               now: Date = Date()) -> NSMenu {
         // 两个来自官方文档的硬约束，不照做菜单就不工作：
         // 1. Dock 菜单的 target/action 不由系统代为分发，文档要求选中项后
@@ -1233,6 +1318,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 与图标和详情窗口保持一致：配置关掉的指标不出现在菜单里
         if showCPU {
             menu.addItem(info("CPU　\(cpu.map { String(format: "%.0f%%", $0 * 100) } ?? "采样中")"))
+        }
+        if showGPU {
+            menu.addItem(info("GPU　\(gpu.map { String(format: "%.0f%%", $0 * 100) } ?? "不可用")"))
         }
         if showMemory {
             menu.addItem(info("内存　\(memory.map { String(format: "%.0f%%", $0 * 100) } ?? "不可用")"))

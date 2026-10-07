@@ -27,34 +27,38 @@ trap 'rm -rf "$WORK"' EXIT
 # extras 可选，形如 pace=0.45,activity=0.8，用于覆盖动效分支；留空则不画动效，
 # 这样既有基准图不会因为新增动效而全量失效。
 CASES=(
-  # 第 7 段 extras 现在还带 gpu=：Dock 图标新增了 GPU 计量条，既有用例不传就是
-  # 「无 GPU 读数」，画出来是一根空槽，与真实使用不符，所以统一给一个典型值。
-  "normal-92:92:0.42:0.61:none:both:gpu=0.12"
-  "low-cpu-45:45:0.08:0.77:none:both:gpu=0.12"
-  "full-100:100:1.0:1.0:none:both:gpu=1.0"
-  "stale:88:0.42:0.61:stale:both:gpu=0.12"
-  "no-data:92:0:0:none:both:gpu=0.12"
-  "hide-cpu:92:0.42:0.61:none:no-cpu:gpu=0.12"
-  "hide-mem:92:0.42:0.61:none:no-mem:gpu=0.12"
-  "hide-both:92:0.42:0.61:none:no-both:gpu=0.12"
-  # 无额度数据：remaining 传 nil（渲染成横杠）。stale 与 no-quota-stale 两个
-  # 用例断言「没有数字时不该标 OLD」——没有快照就谈不上旧数据。
-  "no-quota:nil:0.42:0.61:none:both:gpu=0.12"
-  "no-quota-stale:nil:0.42:0.61:stale:both:gpu=0.12"
-  # 动效分支。extras 是第 7 段：pace=窗口已过比例，activity=亮点相位。
-  "anim-pace:62:0.42:0.61:none:both:pace=0.45,gpu=0.12"
-  "anim-activity:62:0.42:0.61:none:both:activity=0.8,gpu=0.12"
-  "anim-both:62:0.42:0.61:none:both:pace=0.45,activity=0.8,gpu=0.12"
-  # 亮点在已填充部分内移动：填充短时活动范围很小，用 cpu=0.1 覆盖这个边界
-  "anim-lowcpu:62:0.10:0.61:none:both:activity=0.5,gpu=0.12"
-  # GPU 分支。跑本地大模型时 CPU 很低而 GPU 接近满载，这是这套图标最该被一眼
-  # 看出来的场景，所以单独给足负载的用例。
-  "gpu-busy:62:0.10:0.61:none:both:gpu=0.98"
-  "gpu-idle:62:0.10:0.61:none:both:gpu=0.0"
-  # 读不到时（IOKit 接口是未文档化的，可能改名或消失）必须画成空槽而不是猜值
-  "gpu-unavailable:62:0.42:0.61:none:both:nogpu"
-  # 配置关掉 GPU 显示：槽位保留但整根不画，另两项不跳位
-  "hide-gpu:62:0.42:0.61:none:both:gpu=0.5,nogpumeter"
+  # 新签名：<remaining> <cpu> <stale|none> <meters> <extras>
+  # extras: gpu= / rail=<used>/<elapsed>（5h轨，elapsed 传 -1 画无刻度）/
+  #         rail2=<used>/<elapsed>（周轨）/ activity=闪烁相位 / nogpu / nogpumeter
+  # meters: both / no-cpu / no-gpu / no-both
+  #
+  # rail 与 rail2 是额度轨（bullet graph）：填充=已用%，刻度=时间已过%。
+  # 两条轨默认都给典型值——不给的话退化为「无额度数据」外观，与真实使用不符。
+  "normal-92:92:0.42:none:both:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30"
+  "low-cpu-45:45:0.08:none:both:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30"
+  "full-100:100:1.0:stale:both:gpu=1.0,rail=1.0/1.0,rail2=1.0/1.0"
+  "stale:88:0.42:stale:both:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30"
+  "no-data:92:0:none:both:gpu=0.12"
+  "hide-cpu:92:0.42:none:no-cpu:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30"
+  "hide-gpu:92:0.42:none:no-gpu:gpu=0.5,rail=0.35/0.42,rail2=0.12/0.30"
+  "hide-both:92:0.42:none:no-both:gpu=0.5,rail=0.35/0.42,rail2=0.12/0.30"
+  # 无额度数据：remaining 传 nil（渲染成横杠）。stale 与 no-quota-stale 断言
+  # 「没有数字时不该标 OLD」；无轨状态下背板也不画轨底槽（backdropRails 机制）。
+  "no-quota:nil:0.42:none:both:gpu=0.12"
+  "no-quota-stale:nil:0.42:stale:both:gpu=0.12"
+  # 闪烁相位两个极端：亮与暗。activity= 同时代入 pulse。
+  "blink-on:62:0.42:none:both:gpu=0.55,rail=0.35/0.42,rail2=0.12/0.30,activity=0.2"
+  "blink-off:62:0.42:none:both:gpu=0.55,rail=0.35/0.42,rail2=0.12/0.30,activity=0.7"
+  # 低于忙碌阈值不画闪点（activity 相位亮也无点）
+  "idle-nodot:62:0.01:none:both:gpu=0.01,rail=0.35/0.42,rail2=0.12/0.30,activity=0.2"
+  # 跑本地大模型：CPU 低、GPU 满。这是这套图标最该被一眼看出来的场景。
+  "gpu-busy:62:0.10:none:both:gpu=0.98,rail=0.35/0.42,rail2=0.12/0.30,activity=0.2"
+  # 烧得快：used(0.55) > elapsed(0.30)+0.05 → 5h 轨转琥珀色
+  "burning:62:0.10:none:both:gpu=0.98,rail=0.55/0.30,activity=0.2"
+  # 周轨单独变化：只给 rail 不给 rail2 → 只有 5h 轨有底槽
+  "single-rail:62:0.42:none:both:gpu=0.12,rail=0.35/0.42"
+  # 刻度缺失（无 resetsAt 时间信息）→ 填充照画、刻度不画
+  "no-tick:62:0.42:none:both:gpu=0.12,rail=0.35/-1,rail2=0.12/-1"
 )
 
 # 详情窗口的用例。规格只有状态名，由应用内部决定该状态的数据，
