@@ -139,8 +139,13 @@ Dock 启动就永远查询超时。**我在终端验证了很多轮，方向完�
 - **`pageins`/`pageouts` 是亚秒级更新的**，可算磁盘 I/O 速率；已实测读 684MB
   文件时换算出 4489 MB/s，与实际 4493 MB/s 吻合。但它只反映**首次加载**的突发，
   文件进页缓存后就不再增长。
-- **ad-hoc 签名下不可用**的功能（需有效 Developer ID）：系统通知
-  （`UNUserNotificationCenter`）、`SMAppService` 开机自启。本机 0 个有效签名身份。
+- **ad-hoc 签名下不可用**：系统通知（`UNUserNotificationCenter`）——实测
+  `requestAuthorization` 恒定返回 `granted=false` + `UNErrorDomain Code=1`。
+  本机 0 个有效签名身份。
+- **`SMAppService` 开机自启在 ad-hoc 签名下可用**（2026-10-07 实测纠正）：
+  `SMAppService.mainApp.register()` 成功，status 由 `notFound` 变为 `enabled`。
+  我曾按通知的结论类推「同一约束」，**未实测就写进文档，是错的**。
+  通知与开机自启的签名要求不同，不要互相类推。
 
 # 决策记录
 

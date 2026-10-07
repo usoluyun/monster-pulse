@@ -389,5 +389,18 @@ macOS 的内存压力等级。
 
 - **未加 GPU 满载预警**。GPU 常年因浏览器、视频、游戏接近满载，做成默认预警会
   产生大量噪音。是否需要由用户决定。
+
+### 9.5 更正：SMAppService 在 ad-hoc 签名下可用
+
+曾把「开机自启需有效 Developer ID」写成与系统通知同一约束，**这是错的——
+该结论由类推得出，未实测**。2026-10-07 实测：
+
+| 能力 | ad-hoc 签名 | 证据 |
+| --- | --- | --- |
+| 系统通知 `UNUserNotificationCenter` | ❌ 不可用 | `requestAuthorization` 返回 `granted=false` + `UNErrorDomain Code=1` |
+| 开机自启 `SMAppService.mainApp` | ✅ **可用** | `register()` 成功，status 由 `notFound` 变为 `enabled` |
+
+两者签名要求不同，**不要互相类推**。教训与 §验证纪律第 3 条同源：
+我拿「另一个功能的实测结论」当作本功能的证据，而没有真去测。
 - **推理阶段温度未测**。`/sys/class/thermal` 在 macOS 不存在，SMC 传感器读不到值，
   需 `powermetrics` + sudo。
