@@ -479,6 +479,7 @@ if CommandLine.arguments.contains("--settings-render-test") {
     let controller = SettingsWindowController(config: config) { _ in }
     controller.renderToPNG(out)
     print("wrote \(out) state=\(state)")
+    print("layout: \(controller.layoutDiagnostics())")
     exit(0)
 }
 if CommandLine.arguments.contains("--dock-menu-dump") {

@@ -377,11 +377,35 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    /// 按内容高度调整窗口。
+    ///
+    /// 必须走 `window.setContentSize(_:)`，不能直接改 `content.frame`：
+    /// NSWindow 会用窗口尺寸强制覆盖 contentView 的 frame，直接赋值会被丢掉。
+    /// 那样真窗口里内容区仍是创建时的 480pt，而布局是从 `content.bounds.height`
+    /// 往下排的，行数不够时就排到了窗口上边界之外——顶部几项被裁掉看不见。
+    /// 离屏渲染发现不了这个问题，因为它按 content 的 frame 渲染，
+    /// 恰好是「算对了」的那个高度。
     private func resizeWindow() {
         let height = contentHeight + Self.inset * 2 + Self.bottomBar
-        content.frame = NSRect(x: 0, y: 0, width: Self.windowWidth, height: height)
+        window.setContentSize(NSSize(width: Self.windowWidth, height: height))
         layoutRows()
         resetButton.frame = NSRect(x: Self.inset, y: 14, width: 100, height: 28)
+    }
+
+    /// 诊断用：内容实际需要多高、窗口**实际提供**多高的内容区、有没有把顶部裁掉。
+    ///
+    /// 判据必须用 `window.contentLayoutRect.height` 而不是 `content.bounds.height`：
+    /// 后者读的是我们自己刚赋值的 frame，只改 content.frame 而没调
+    /// setContentSize 时它照样是「够高」的值（窗口要到真正显示时才把 frame 压回去），
+    /// 因此完全测不出这个 bug。contentLayoutRect 才是窗口实际给出的可用高度。
+    func layoutDiagnostics() -> String {
+        let needed = contentHeight + Self.inset * 2 + Self.bottomBar
+        let capacity = window.contentLayoutRect.height
+        let topMost = rows.map { $0.view.frame.maxY }.max() ?? 0
+        return String(format: "需要 %.0fpt，窗口提供 %.0fpt，%@；最上元素顶端 %.0fpt %@",
+                      needed, capacity,
+                      capacity + 0.5 >= needed ? "足够" : "不足(顶部被裁)",
+                      topMost, capacity + 0.5 >= topMost ? "在可视区内" : "超出可视区")
     }
 
     // MARK: 交互

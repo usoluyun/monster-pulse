@@ -127,7 +127,17 @@ done
 echo
 echo "设置面板视觉回归（容差 ${TOL}）"
 for state in "${SETTINGS_CASES[@]}"; do
-  "$APP" --settings-render-test "$WORK/$state.png" "${state#settings-}" >/dev/null
+  diag="$("$APP" --settings-render-test "$WORK/$state.png" "${state#settings-}" | grep '^layout:')"
+  if [ -z "$diag" ]; then
+    echo "  ERROR $state 未输出布局诊断"; fail=$((fail+1)); continue
+  fi
+  # 「不足(顶部被裁)」意味着窗口没长够高、最上面几项在可视区之外。
+  # 这正是「看不到顶部设置」的成因：只改 content.frame 不会让窗口变高，
+  # 而离屏渲染按 content.frame 渲染所以看不出来。必须在这里拦住。
+  case "$diag" in
+    *"不足"*|*"超出可视区"*)
+      echo "  FAIL  $state 布局被裁：$diag"; fail=$((fail+1)); continue ;;
+  esac
   compare "$state" "$WORK/$state.png"
 done
 
