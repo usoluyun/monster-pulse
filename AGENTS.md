@@ -5,46 +5,66 @@
 
 ## 项目是什么
 
-macOS Dock 常驻小应用：显示 Codex 订阅额度、CPU 忙闲、内存与磁盘 I/O。
-Swift + AppKit，零第三方依赖。`app/` 是全部源码，`app/Sources/` 分四层：
+macOS Dock 常驻小应用：显示 Codex 订阅额度、CPU、GPU、内存与磁盘 I/O。
+Swift + AppKit，零第三方依赖。`app/` 是全部源码，`app/Sources/` 的分工：
 
 | 文件 | 职责 |
 |---|---|
-| `Metrics.swift` | 领域层：额度解析、Codex 子进程查询、系统采样、格式化。只依赖 Foundation |
+| `Metrics.swift` | 领域层：额度解析、Codex 子进程查询、系统采样（CPU/内存/磁盘/GPU）、格式化。**不 import AppKit** |
 | `Alerts.swift` | 预警规则与跃迁去重。纯逻辑，不碰 AppKit |
 | `Config.swift` | 配置读写 + 设置窗口 |
 | `DetailsView.swift` | 详情窗口视图 |
 | `main.swift` | 应用生命周期、Dock 图标、自检与渲染夹具 |
 
-分层原则：**逻辑必须在不依赖 AppKit 的地方**，这样 `--self-test` 才能在创建
-NSApplication 之前跑完。
+分层原则：**领域逻辑与预警逻辑必须放在不 import AppKit 的文件里**，这样
+`--self-test` 才能在创建 NSApplication 之前跑完全部断言。
+
+注：`Metrics.swift` 还 import 了 `Darwin`（mach 采样）与 `IOKit`（GPU 采样），
+两者都是纯 C 接口，不需要 AppKit 运行时。
 
 ## 构建与验证
 
 ```sh
 bash app/build.sh                      # Release(-O)，产物在 app/.build/
 app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse --self-test
-bash app/tests/render-regress.sh       # 视觉回归（25 个用例，容差 24）
+bash app/tests/render-regress.sh       # 视觉回归（26 个用例，容差 24）
 bash app/tests/run-abnormal-tests.sh   # 查询失败 10 场景
 bash app/tests/run-termination-tests.sh # 退出路径 2 条
 bash app/tests/run-perf-test.sh        # 性能验收（3 轮，约 75 分钟）
 ```
 
+命令行模式（均在创建 AppKit 应用之前退出）：
+
+| 模式 | 用途 |
+|---|---|
+| `--self-test` | 全部纯逻辑断言，不联网。系统采样会等计数器变化，最长约 1 秒 |
+| `--probe` | 读真实额度，单次。非零退出即失败，不用模拟值代替 |
+| `--render-test` | Dock 图标离屏渲染，规格见 `tests/render-regress.sh` 的 `CASES` |
+| `--details-render-test` | 详情窗口离屏渲染：`normal` / `no-data` / `stale` / `error` / `loading` / `*-no-meters` / `no-gpu` |
+| `--settings-render-test` | 设置面板离屏渲染，并输出 `layout:` 诊断（`render-regress.sh` 据此判 FAIL） |
+| `--dock-menu-dump` | 打印 Dock 菜单的启用态、标题与 action 选择器，人工点验时的对照依据 |
+| `--draw-bench` | 单帧 draw 成本微基准 |
+
 离屏渲染（改 UI 后**必须实际看图**，不能只看测试通过）：
 
 ```sh
-app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse --render-test <out.png> 62 0.42 0.61 none both "pace=0.45,activity=0.8"
-app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse --details-render-test <out.png> normal
-app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse --settings-render-test <out.png> full
+APP=app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse
+$APP --render-test <out.png> 62 0.42 0.61 none both "pace=0.45,activity=0.8"
+$APP --details-render-test <out.png> normal
+$APP --settings-render-test <out.png> full
 ```
+
+诊断通道：`MP_SAMPLE_LOG=/tmp/x.csv` 时逐次采样落盘（默认关闭——每 5 秒写盘是
+真实开销且日志无上限）。`app/tests/mem-probe.sh` 是详情窗口开/关的对照实验。
 
 ---
 
 # 验证纪律（重要，以下每条都是实际踩过的坑）
 
-> 这八条不是预防性_best practice_，是本项目实际付出过代价换来的。
+> 这九条不是预防性_best practice_，是本项目实际付出过代价换来的。
 > 第 1、2、3 条是同一类错误的三个侧面：**我制造了一个自己的环境，然后在里面验证**——
 > 终端代替 Dock 启动、content.frame 代替窗口实际尺寸、自己写的值代替最终生效的值。
+> 第 9 条是另一类：**借用另一个功能的实测结论**。
 
 ## 1. 验证场景必须匹配真实使用场景
 
@@ -118,6 +138,24 @@ Dock 启动就永远查询超时。**我在终端验证了很多轮，方向完�
 
 用 `precondition` 会 SIGTRAP 且 stderr 不冲刷，排查时只拿到空白。改成收集式
 断言：跑完全部用例后汇总输出，退出码 1。
+
+## 9. 每个功能要单独验证，不能拿 A 的证据当 B 的
+
+我曾断言「开机自启和系统通知是同一签名约束，都需 Developer ID」，并把这句写进
+AGENTS.md、README、验证报告和待办。**这条结论从未实测**——它是从通知的实测
+结果类推来的（通知确实失败：ad-hoc 签名下 `requestAuthorization` 返回
+`granted=false` + `UNErrorDomain Code=1`）。用户质疑后实测发现：
+
+| 能力 | ad-hoc 签名 | 证据 |
+| --- | --- | --- |
+| `UNUserNotificationCenter` | 不可用 | 实测授权失败 |
+| `SMAppService.mainApp.register()` | **可用** | 实测 status 由 `notFound` 变为 `enabled` |
+
+「同一约束」「应该同样受限」这类说法尤其危险：它听起来像结论，实际上是
+一次没有执行的实验。**签名、权限、沙箱这类要求逐能力独立实测，不要互相类推。**
+
+规则：写进 AGENTS.md / 报告的任何能力判断，必须能指回一次真实执行；
+指不回去就标注「未验证」，不要用类推填空。
 
 ---
 
