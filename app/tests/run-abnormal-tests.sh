@@ -133,11 +133,16 @@ else
 
   # 真实断网：给子进程注入死代理，只影响这次查询，不改系统网络
   DEAD_WRAP="$(mktemp -d)/codex-deadproxy"
-  printf '#!/bin/bash\nexport HTTPS_PROXY=http://127.0.0.1:1\nexport HTTP_PROXY=http://127.0.0.1:1\nexport ALL_PROXY=http://127.0.0.1:1\nexec %s "$@"\n' "$REAL_CODEX" >"$DEAD_WRAP"
+  printf '#!/bin/bash\nexport HTTPS_PROXY=http://127.0.0.1:1\nexport HTTP_PROXY=http://127.0.0.1:1\nexport ALL_PROXY=http://127.0.0.1:1\nexport https_proxy=http://127.0.0.1:1\nexport http_proxy=http://127.0.0.1:1\nexport all_proxy=http://127.0.0.1:1\nexport NO_PROXY=\nexport no_proxy=\nexec %s "$@"\n' "$REAL_CODEX" >"$DEAD_WRAP"
   chmod +x "$DEAD_WRAP"
+  started=$(date +%s)
   out="$(CODEX_BIN="$DEAD_WRAP" "$APP" --probe 2>&1)"; rc=$?
-  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "login status 和网络"; then
-    pass=$((pass+1)); printf '  PASS  %-16s 真实断网：死代理下干净报错且文案正确\n' "real-offline"
+  elapsed=$(( $(date +%s) - started ))
+  # CLI 可能立即报网络错误，也可能等待到应用的 20s deadline；两条都应干净失败。
+  if [ "$rc" -ne 0 ] && [ "$elapsed" -le 25 ] && \
+      printf '%s' "$out" | grep -Eq 'Codex 查询(失败|超时或进程退出)' && \
+      printf '%s' "$out" | grep -q '网络'; then
+    pass=$((pass+1)); printf '  PASS  %-16s 真实断网：死代理下 %ss 内报错并提示检查网络\n' "real-offline" "$elapsed"
   else
     fail=$((fail+1)); printf '  FAIL  %-16s rc=%s 输出: %s\n' "real-offline" "$rc" "$out"
   fi

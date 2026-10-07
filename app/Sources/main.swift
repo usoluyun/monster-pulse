@@ -22,6 +22,8 @@ let renderAppearance = NSAppearance(named: .darkAqua)!
 signal(SIGPIPE, SIG_IGN)
 
 func verify() throws {
+    let realDomain = Bundle.main.bundleIdentifier ?? "MonsterPulse"
+    let realConfigBefore = UserDefaults.standard.persistentDomain(forName: realDomain) as NSDictionary?
     let q = try Quota.parse(["rateLimits": ["primary": ["usedPercent": 25.0, "windowDurationMins": 300]]])
     precondition(q.windows.first?.remaining == 75)
     let mapped = try Quota.parse(["rateLimitsByLimitId": ["codex": ["primary": ["usedPercent": 100.0]]]])
@@ -145,8 +147,10 @@ func verify() throws {
 
     // Config 的越界夹取与持久化。直接往 UserDefaults 写脏值再 load()，
     // 验证「配置文件被手改或来自旧版本」时不会让定时器行为失控。
-    let defaults = UserDefaults.standard
-    let domain = Bundle.main.bundleIdentifier ?? "local.monsterpulse.selftest"
+    let domain = "local.monsterpulse.selftest.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: domain)!
+    Config.registerDefaults(defaults: defaults)
+    defer { defaults.removePersistentDomain(forName: domain) }
     func withConfigDomain<T>(_ body: () -> T) -> T {
         defaults.removePersistentDomain(forName: domain)
         // register 的注册域挂在 app 域上，这里直接改写同一批 key
@@ -156,7 +160,7 @@ func verify() throws {
         defaults.set(0.0, forKey: "systemSampleInterval")       // 越下界
         defaults.set(9999.0, forKey: "quotaRefreshInterval")    // 越上界
         defaults.set(Double.nan, forKey: "systemSampleInterval")
-        let clamped = Config.load()
+        let clamped = Config.load(defaults: defaults)
         if clamped.systemInterval != Config.defaultSystemInterval {
             failures.append("Config.load 越界 systemInterval 应回退默认，得到 \(clamped.systemInterval)")
         }
@@ -166,7 +170,7 @@ func verify() throws {
         // 合法区间内的值必须被保留，不能被误夹
         defaults.set(7.0, forKey: "systemSampleInterval")
         defaults.set(45.0, forKey: "quotaRefreshInterval")
-        let kept = Config.load()
+        let kept = Config.load(defaults: defaults)
         if kept.systemInterval != 7.0 || kept.quotaInterval != 45.0 {
             failures.append("Config.load 未保留合法值，得到 \(kept.systemInterval)/\(kept.quotaInterval)")
         }
@@ -379,6 +383,11 @@ func verify() throws {
         if NetworkStatus.proxyEnabled([key: 1]) != true { failures.append("系统代理开关 \(key)") }
     }
     if NetworkStatus.proxyEnabled(["HTTPProxy": "localhost", "HTTPEnable": 0]) != false { failures.append("代理地址不能当成开启") }
+    let probeArgs = NetworkMonitor.probeArguments(proxy: "socks5://localhost:1080")
+    if !probeArgs.contains("socks5://localhost:1080") || !probeArgs.contains("--disable")
+        || !probeArgs.contains("--noproxy") || probeArgs.last != "https://cloudflare.com/cdn-cgi/trace" {
+        failures.append("应用代理探测必须显式指定代理并禁用隐式绕过")
+    }
     if NetworkStatus.proxyEnabled(nil) != nil { failures.append("无法读取代理时不能报关闭") }
     if NetworkStatus.parseTrace("ip=203.0.113.1\nloc=US\ncolo=HKG")?.country != "US" { failures.append("国家要读 loc 而不是 colo") }
     if NetworkStatus.parseTrace("ip=2001:db8::1\nloc=HK")?.country != "HK" { failures.append("IPv6 出口解析") }
@@ -393,6 +402,10 @@ func verify() throws {
         for line in failures { fputs("FAIL  \(line)\n", stderr) }
         throw ReadError.message("自检失败 \(failures.count) 项")
     }
+    let realConfigAfter = UserDefaults.standard.persistentDomain(forName: realDomain) as NSDictionary?
+    if realConfigBefore != realConfigAfter {
+        throw ReadError.message("自检不得改变真实配置域")
+    }
     print("PASS: quota parsing, missing/invalid/other buckets, CPU and memory sampling, window title and countdown formatting, dock menu structure, config clamping, quota alerts")
 }
 
@@ -401,9 +414,9 @@ if CommandLine.arguments.contains("--self-test") {
 }
 if CommandLine.arguments.contains("--network-probe") {
     let monitor = NetworkMonitor()
-    monitor.poll(force: true) {
+    monitor.poll(proxy: Config.load().effectiveProxy, force: true) {
         guard !monitor.loading else { return }
-        print("country=\(monitor.exit?.country ?? "?") proxy=\(monitor.proxyEnabled.map { $0 ? "on" : "off" } ?? "unknown")")
+        print("country=\(monitor.exit?.country ?? "?") proxy=\(monitor.probeProxyEnabled.map { $0 ? "on" : "off" } ?? "unknown")")
         exit(monitor.exit == nil ? 1 : 0)
     }
     RunLoop.main.run()
@@ -505,6 +518,12 @@ if CommandLine.arguments.contains("--render-test") {
         if key == "gpu" { view.gpu = value }
     }
     let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+    // Exercise changing the switches on an existing view, including cached tracks.
+    let desiredCPU = view.showCPU, desiredGPU = view.showGPU
+    view.showCPU = !desiredCPU; view.showGPU = !desiredGPU
+    let warmup = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
+    view.cacheDisplay(in: view.bounds, to: warmup)
+    view.showCPU = desiredCPU; view.showGPU = desiredGPU
     view.cacheDisplay(in: view.bounds, to: bitmap)
     try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
     print("wrote \(out) remaining=\(view.remaining ?? -1) cpu=\(view.cpu ?? -1) gpu=\(view.gpu ?? -1) stale=\(view.stale) rails=\(view.rails.count)")
@@ -692,6 +711,11 @@ if CommandLine.arguments.contains("--details-render-test") {
     // 容器模拟真实窗口的 contentView，这样 details 的 frame 与线上一致
     let container = NSView(frame: NSRect(origin: .zero, size: total))
     container.appearance = renderAppearance
+    // 离屏没有窗口垫底；显式解析已钉住的深色外观，避免 README 中白字透明底。
+    container.wantsLayer = true
+    renderAppearance.performAsCurrentDrawingAppearance {
+        container.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+    }
     details.appearance = renderAppearance
     container.addSubview(details)
     details.frame = NSRect(x: inset, y: bottomBar, width: width - inset * 2, height: content)
@@ -747,6 +771,7 @@ final class DockView: NSView {
     private var backdropStale = false
     private var backdropSize: CGSize = .zero
     private var backdropRails = 0
+    private var backdropMeters = ""
     private var glyphs: [String: NSImage] = [:]
     /// 字形缓存有上限，额度变化时不持续积累位图；超过上限整体重建。
     private static let glyphCacheLimit = 24
@@ -789,7 +814,7 @@ final class DockView: NSView {
         NSRect(x: railX, y: 26 - CGFloat(index) * 15, width: railWidth, height: railHeight)
     }
 
-    /// 无读数时用斜纹区分「不可用」与零负载；关闭的指标仅保留底槽。
+    /// 无读数时用斜纹区分「不可用」与零负载；关闭的指标连同底槽一起隐藏。
     private func drawUnavailable(in rect: NSRect) {
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3).addClip()
@@ -816,7 +841,7 @@ final class DockView: NSView {
                 NSBezierPath(roundedRect: rail, xRadius: 1.5, yRadius: 1.5).fill()
             }
             NSColor.darkGray.setFill()
-            for slot in 0..<DockView.meterSlots {
+            for slot in 0..<DockView.meterSlots where slot == 0 ? self.showCPU : self.showGPU {
                 let bar = DockView.meterRect(slot: slot)
                 NSBezierPath(roundedRect: bar, xRadius: 3, yRadius: 3).fill()
             }
@@ -826,11 +851,12 @@ final class DockView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         if backdrop == nil || backdropStale != stale || backdropSize != bounds.size
-            || backdropRails != rails.count {
+            || backdropRails != rails.count || backdropMeters != "\(showCPU):\(showGPU)" {
             backdrop = makeBackdrop()
             backdropStale = stale
             backdropSize = bounds.size
             backdropRails = rails.count
+            backdropMeters = "\(showCPU):\(showGPU)"
         }
         backdrop?.draw(in: bounds)
 
@@ -859,7 +885,7 @@ final class DockView: NSView {
             drawGlyph("%", in: NSRect(x: 54, y: 57, width: 12, height: 20),
                       size: 11, color: markStale ? .systemOrange : .white)
         }
-        // 左上角网络状态：国家代码与系统代理开关独立显示。
+        // 左上角网络状态：国家代码与探测路径的代理开关显示。
         drawGlyph(country ?? "?", in: NSRect(x: 14, y: 92, width: 37, height: 28),
                   size: 19, color: .white)
         let dot = NSRect(x: 55, y: 104, width: 8, height: 8)
@@ -1019,9 +1045,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// 配置变更后的统一处理：重启定时器让新间隔立即生效，
-    /// 并刷新展示（CPU/内存可能被隐藏）。
+    /// 并刷新展示（CPU/GPU 可能被隐藏）。
     func configChanged() {
         startTimers()
+        network.poll(proxy: config.effectiveProxy) { [weak self] in self?.render() }
         render()
         evaluateAlerts(afterConfigChange: true)
     }
@@ -1059,7 +1086,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func tick() {
         guard !sleeping else { return }
-        network.poll { [weak self] in self?.render() }
+        network.poll(proxy: config.effectiveProxy) { [weak self] in self?.render() }
         let data = sampler.sample()
         dock.cpu = data.cpu; dock.gpu = data.gpu?.deviceUtilization
         system = data
@@ -1189,7 +1216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func render() {
         dock.remaining = quota?.windows.first?.remaining
         dock.country = network.exit?.country
-        dock.proxyEnabled = network.proxyEnabled
+        dock.proxyEnabled = network.probeProxyEnabled
         dock.resetLabel = NetworkStatus.resetLabel(quota?.windows.first?.resetsAt)
         // stale 的含义是「有快照但已过期」，所以必须先有数据。
         // 之前只要有 errorText 就是 stale，首次查询失败（根本没有快照）也会
@@ -1248,7 +1275,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let proxy = network.proxyEnabled.map { $0 ? "开启" : "关闭" } ?? "未知"
         let name = network.exit.flatMap { Locale(identifier: "zh_CN").localizedString(forRegionCode: $0.country) }
         let country = name ?? "未知"
-        let lines = ["探测出口（Cloudflare）：\(country)",
+        let lines = ["应用出口（\(network.routeLabel)）：\(country)",
                      "出口 IP：\(network.exit?.ip ?? "未知")",
                      "系统代理：\(proxy)（不代表全部流量）"]
         for (index, line) in lines.enumerated() {

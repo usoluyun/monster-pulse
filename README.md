@@ -1,84 +1,118 @@
-# Monster Pulse · 怪兽脉搏
+<p align="center"><img src="app/Resources/AppIcon.svg" width="96" alt="Monster Pulse：灰白怪兽与轮廓回声"></p>
+<h1 align="center">Monster Pulse · 怪兽脉搏</h1>
+<p align="center">把 Codex 剩余额度和 Mac 的忙闲，放在 Dock 上。</p>
+<p align="center">macOS 13+ · Swift + AppKit · 无第三方运行时依赖<br><a href="LICENSE">代码：MIT</a> · <a href="NOTICE.md">怪兽形象：保留版权</a></p>
 
-Dock 上的 AI 额度与系统状态监测器。
+一个常驻 macOS Dock 的小工具：显示 Codex 订阅额度、CPU / GPU 占用和网络出口，点击图标查看详情，关闭窗口后继续运行。
 
-Monster Pulse 是一个面向 macOS 的轻量原生应用：常驻 Dock，让你一眼看到 Codex 订阅额度、CPU 忙闲与内存占用，并通过详情窗口查看额度窗口和重置时间。
+这是一个个人练手项目，按自己的使用习惯慢慢打磨。有用就拿去用，欢迎提 Issue 或 PR。它不是 OpenAI 官方产品，也不承诺支持所有设备和未来的 Codex CLI 版本。
 
-## 产品方向
+## 预览
 
-- **一眼即知**：优先展示 AI 额度，兼顾系统状态。
-- **轻量常驻**：采用 Swift + AppKit，无第三方依赖，减少后台采样与绘制开销。
-- **怪兽陪伴**：延续 Monster 产品命名风格，探索以小怪兽及轻量动效表达状态。
-- **如实展示**：明确区分有效、过期与不可用数据。
+<p align="center"><img src="docs/images/dock.png" width="128" alt="Dock：剩余额度、出口国家、重置倒计时与 CPU / GPU 计量条"> &nbsp; <img src="docs/images/details.png" width="460" alt="详情：额度窗口、重置时间和系统资源状态"></p>
 
-## 当前状态
+截图使用固定示例数据。未启动时显示灰白怪兽，两层渐淡轮廓表达 Pulse；运行时切换为状态仪表。
 
-PoC 已转正为本项目的正式源码，位于 `app/`。可执行文件由 `CodexDock` 改名为 `MonsterPulse`，bundle id 为 `local.monsterpulse`。
+## 功能
 
-功能上暂无变化：仍是 Codex 额度 + CPU + 内存三项。初期聚焦 Codex 订阅额度；后续可探索更多 AI 工具的额度与状态。
+- **剩余额度**：数字与圆环显示 Codex 主额度窗口的剩余百分比，附重置倒计时；详情展示各额度窗口。
+- **消耗节奏**：底部额度轨对比已用额度和已过时间。
+- **系统负载**：Dock 显示 CPU / GPU 计量条，可分别隐藏；详情还有内存估算、压缩内存、Swap 与磁盘读入速率。
+- **网络出口**：显示探测出口的国家代码和代理状态，Dock 右键菜单提供更多信息。
+- **本机设置**：调整采样与刷新间隔、应用代理、额度预警和开机自启。预警通过 Dock 图标跳动提示。
+- **异常状态**：查询失败时保留最后快照并标记过期状态，不用模拟数据冒充实际结果。
 
-**核心目标「资源占用低于活动监视器」已于 2026-10-06 达成**：3 轮重复、修正全部计量缺陷、
-动效开启的条件下，平均 CPU 为活动监视器的 29.5%、平均物理内存为 14.0%。此前记录的两处
-数据缺陷（父子 footprint 求和、活动监视器多进程计量）均已修正。唤醒次数与能耗仍未采集。
+## 安装与运行
 
-已实现：详情窗口结构化布局、Dock 右键菜单、可配置刷新频率与显示项、额度预警（Dock 图标跳动）、
-低帧率动效（额度时间进度轨 + CPU 活动亮点）。
+需要 **macOS 13+** 和 **Xcode Command Line Tools**。读取额度另需支持 `app-server` 的 Codex CLI，并以 ChatGPT 订阅账户登录；仅使用 API Key 的账户不在项目的目标范围内。
 
-## 目录
-
-```text
-monster-pulse/
-├── README.md
-├── app/           # 应用源码（Swift + AppKit）、构建脚本与测试资产
-│   ├── Sources/
-│   ├── tests/
-│   ├── Info.plist
-│   └── build.sh
-└── docs/          # 产品定位、设计方案与验证记录
-```
-
-## 快速开始
-
-需要 macOS 13+、Xcode Command Line Tools；读取真实额度另需支持 app-server 的 Codex CLI，并以 ChatGPT 订阅方式登录。
+目前没有预编译发行包，直接从源码构建：
 
 ```sh
-bash app/build.sh
+git clone https://github.com/usoluyun/monster-pulse.git
+cd monster-pulse
+
+# 未安装 Apple 命令行工具时执行
+xcode-select --install
+
+# 确认 Codex CLI 已安装并登录
+codex login status
+
+# 构建、本机签名和自检
+bash app/build.sh --sign
 app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse --self-test
-open app/.build/MonsterPulse.app
+
+# 安装后从 Finder / Dock 启动
+bash app/install.sh
+open /Applications/MonsterPulse.app
 ```
 
-## 文档
+更新前先退出应用，再重新构建、安装。安装脚本会刷新应用包日期并重新登记系统图标，避免 Dock / 启动台继续显示旧缓存。安装需要目标目录的写入权限。
+
+也可以直接运行 `open app/.build/MonsterPulse.app`。点击 Dock 图标打开详情，`⌘,` 打开设置，`⌘Q` 退出。
+
+### 代理与网络
+
+从 Finder / Dock 启动不会继承终端代理环境。需要代理时，请在设置中的「应用代理」填写地址，如 `http://127.0.0.1:7890`；它用于 Codex 查询和出口探测。留空时，出口探测使用系统代理设置。
+
+出口探测请求 Cloudflare 的 `/cdn-cgi/trace`，获取 IP 和国家；它只代表这次请求的出口。PAC、分流或 VPN 下，其他网站可能走不同线路，系统代理开关也不代表所有流量都经过代理。
+
+设置保存在本机 UserDefaults。项目没有自建后端或应用遥测；Codex 查询通过本机 CLI 完成，其认证与日志由 CLI 管理。
+
+<details>
+<summary>设置面板预览</summary>
+
+<p><img src="docs/images/settings.png" width="460" alt="设置：刷新间隔、显示项、预警、代理与开机自启"></p>
+
+</details>
+
+## 开发与验证
+
+源码集中在 `app/Sources/`，领域层与 UI 分离，不需要 Xcode 工程或包管理器。
+
+| 文件 | 职责 |
+| --- | --- |
+| `Metrics.swift` | 额度解析、Codex 子进程查询与系统采样 |
+| `Network.swift` | 代理选择、出口探测与网络数据解析 |
+| `Alerts.swift` | 预警规则与去重 |
+| `Config.swift` | 本机配置与设置窗口 |
+| `DetailsView.swift` | 详情窗口 |
+| `main.swift` | 应用生命周期、Dock 绘制与测试入口 |
+
+```sh
+bash app/build.sh --sign
+app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse --self-test
+bash app/tests/render-regress.sh
+bash app/tests/run-abnormal-tests.sh
+bash app/tests/run-termination-tests.sh
+```
+
+渲染回归需要 Python 3。自检不联网，使用独立的测试配置域；渲染夹具使用固定数据，不修改真实设置。修改 UI 后也请实际看图，并从 Finder / Dock 验证真实窗口。详细规范见 [AGENTS.md](AGENTS.md)。
+
+修改图标后运行 `bash app/generate-icon.sh` 生成 `.icns`；仅这一步需要 librsvg 的 `rsvg-convert`。常规构建直接使用仓库内的图标。
+
+## 已知限制
+
+- GPU 采样使用 IOKit 中未文档化的统计字段，兼容性无法保证；读取失败时显示不可用。
+- 内存是页面统计的估算值，不等于活动监视器的「内存压力」；磁盘读入统计也不是全量磁盘 I/O。
+- 依赖 Codex CLI 的 `app-server` 协议，登录状态、网络连接和协议变化可能影响额度查询。
+- 默认每 5 秒采样系统指标、每 5 分钟查询额度，不是实时性能分析工具。
+- 小尺寸 Dock 有可读性限制。系统通知未启用，预警使用 Dock 跳动。
+- `--sign` 为 ad-hoc 签名，未做 Apple 公证。本机已验证开机自启；其他设备仍需自行验证。
+
+## 文档与贡献
 
 - [文档入口](docs/README.md)
-- [可行性方案与 PoC 设计](docs/codex-dock-feasibility.md)：产品范围、数据来源、技术实现与性能验收方法。
-- [阶段性验证报告](docs/codex-dock-verification.md)：异常查询、退出清理、长期运行、绘制成本及待解决问题。
-- [构建、打包与测试说明](docs/poc-usage.md)
+- [设计与数据来源](docs/codex-dock-feasibility.md)
+- [构建、打包与测试](docs/poc-usage.md)
+- [阶段性验证记录](docs/codex-dock-verification.md)
 
-`docs/` 下的文件名与内容保留 `codex-dock` 历史命名，因为它们是 PoC 阶段的原始记录，改名会破坏可追溯性。
+部分文档保留早期 `CodexDock` 的名称和历史测量结果，当前功能以源码和本 README 为准。
 
-## 后续重点
+欢迎小而具体的改进。提 Issue 时请附 macOS / 芯片型号、Codex CLI 版本、复现步骤及脱敏后的错误信息；提交代码前运行相关检查，UI 修改请附截图。
 
-按优先级：
+## 许可与形象版权
 
-1. **Monster 角色视觉** —— 当前图标仍是中性进度条 + 数字，尚未体现「怪兽陪伴」这一产品方向。建议在动效基础上做，两者会同时改 `draw()`。
-2. **唤醒次数与能耗** —— 性能验收唯一未覆盖项，需 `powermetrics` + sudo。
-3. **系统睡眠与唤醒验证** —— 代码已实现但从未实测，`willSleep`/`didWake` 无法注入伪造，需真机操作。
+**代码与文档采用 [MIT License](LICENSE)，怪兽形象不在 MIT 授权范围内。**
 
-已完成：关闭窗口内存突增定性（§6.1，实为计量口径问题）、低帧率动效、性能验收 3 轮、Dock 右键菜单人工点验、开机自启。
-
-## 开机自启
-
-设置面板 → 「启动」分组。实现走 `SMAppService.mainApp`，**ad-hoc 签名下实测可用，不需要
-Developer ID**——曾经写成「需有效签名」，那是从系统通知的失败类推来的，未实测，是错的。
-
-两条设计要点：
-
-- **事实源是系统状态，不是本地配置。** 用户也能在「系统设置 → 通用 → 登录项」里改，
-  所以面板里的勾选只是系统状态的显示，每次打开都重读 `SMAppService.status`。
-  勾选后无论注册成功与否都重读一次，失败时勾选会被纠正回真实值。
-- **状态分四档**，文案不同：`enabled` / `requiresApproval`（还需用户去系统设置放行）/
-  `notRegistered` / `notFound`（`--standalone` 形态无 bundle id，功能置灰）。
-
-配合自启，额度轮询默认从 2 分钟放宽到 **5 分钟**：应用整天常驻，每次查询都要 spawn
-一个 codex app-server 子进程，120 秒是一天 720 次。额度本身变化慢——5 小时窗口里用掉
-20% 通常要一小时以上。仍可在设置面板自行调回。
+「未定体」角色、其灰白改色与轮廓回声变体，以及 `app/Resources/AppIcon.svg`、`AppIcon.icns`，版权归原著作权人所有，保留所有权利。公开代码不代表开放形象版权；版权范围与使用限制见 [NOTICE.md](NOTICE.md) 和 [素材版权声明](app/Resources/LICENSE.txt)。

@@ -3,7 +3,7 @@ import SystemConfiguration
 import Darwin
 
 /// 系统代理开关与探测请求的出口是两件事：PAC/分流/VPN 可让不同目标走不同出口。
-/// 这里只探测 Cloudflare，不借用 Codex 手填代理，也不读取 shell 的代理环境。
+/// 探测优先使用应用手填代理；留空时使用系统代理，不读取 shell 环境。
 enum NetworkStatus {
     static func proxyEnabled(_ settings: [String: Any]?) -> Bool? {
         guard let settings else { return nil }
@@ -53,6 +53,10 @@ final class NetworkMonitor {
     private(set) var updated: Date?
     private(set) var error: String?
     private(set) var loading = false
+    private var configuredProxy: String?
+    var probeProxyEnabled: Bool? { configuredProxy == nil ? proxyEnabled : true }
+    var routeLabel: String { configuredProxy == nil ? "系统网络 / Cloudflare" : "应用代理 / Cloudflare" }
+    private var process: Process?
     private var settings: NSDictionary?
     private var initialized = false
     private var nextProbe = Date.distantPast
@@ -60,25 +64,55 @@ final class NetworkMonitor {
     private var session: URLSession?
     private var generation = 0
 
-    func poll(force: Bool = false, changed: @escaping () -> Void) {
+    func poll(proxy: String? = nil, force: Bool = false, changed: @escaping () -> Void) {
         let current = SCDynamicStoreCopyProxies(nil) as? [String: Any]
         let dictionary = current.map { $0 as NSDictionary }
-        let different = !initialized || dictionary != settings
+        let normalized = ProxySetting.normalize(proxy)
+        let different = !initialized || dictionary != settings || normalized != configuredProxy
         if different {
             stop()
             initialized = true
             settings = dictionary
+            configuredProxy = normalized
             proxyEnabled = NetworkStatus.proxyEnabled(current)
             exit = nil; updated = nil; error = nil
         }
         guard !loading, force || Date() >= nextProbe else { return }
-        guard current != nil else {
+        guard current != nil || normalized != nil else {
             error = "无法读取系统代理配置"; nextProbe = Date().addingTimeInterval(60)
             changed(); return
         }
         loading = true
         nextProbe = Date().addingTimeInterval(300)
         let token = generation
+        if let normalized {
+            // curl supports HTTP CONNECT, HTTPS and SOCKS URLs including authentication.
+            // Explicit arguments override inherited proxy / NO_PROXY values; never fall back to direct.
+            let process = Process()
+            let output = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+            process.arguments = Self.probeArguments(proxy: normalized)
+            process.environment = ProcessInfo.processInfo.environment.filter {
+                !["http_proxy", "https_proxy", "all_proxy", "no_proxy"].contains($0.key.lowercased())
+            }
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
+            process.terminationHandler = { [weak self] process in
+                let data = output.fileHandleForReading.readDataToEndOfFile()
+                let result = process.terminationStatus == 0 && data.count <= 8192
+                    ? String(data: data, encoding: .utf8).flatMap(NetworkStatus.parseTrace) : nil
+                DispatchQueue.main.async {
+                    guard let self, token == self.generation else { return }
+                    self.process = nil
+                    self.complete(result, changed: changed)
+                }
+            }
+            self.process = process
+            do { try process.run() }
+            catch { self.process = nil; complete(nil, changed: changed) }
+            changed()
+            return
+        }
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 8
         config.timeoutIntervalForResource = 12
@@ -98,20 +132,33 @@ final class NetworkMonitor {
             } else { result = nil }
             DispatchQueue.main.async {
                 guard let self, token == self.generation else { return }
-                self.loading = false; self.task = nil; self.session = nil
-                self.exit = result
-                self.updated = result == nil ? nil : Date()
-                self.error = result == nil ? "出口探测失败，国家未知" : nil
-                if result == nil { self.nextProbe = Date().addingTimeInterval(60) }
-                changed()
+                self.task = nil; self.session = nil
+                self.complete(result, changed: changed)
             }
         }
         task?.resume()
         changed()
     }
 
+    static func probeArguments(proxy: String) -> [String] {
+        ["--disable", "--silent", "--show-error", "--fail", "--max-time", "12",
+         "--connect-timeout", "8", "--max-filesize", "8192", "--proxy", proxy,
+         "--noproxy", "", "https://cloudflare.com/cdn-cgi/trace"]
+    }
+
+    private func complete(_ result: NetworkStatus.Exit?, changed: () -> Void) {
+        loading = false
+        exit = result
+        updated = result == nil ? nil : Date()
+        error = result == nil ? "出口探测失败，国家未知" : nil
+        if result == nil { nextProbe = Date().addingTimeInterval(60) }
+        changed()
+    }
+
     func stop() {
         generation += 1
+        if let process, process.isRunning { process.terminate() }
+        process = nil
         task?.cancel(); session?.invalidateAndCancel()
         task = nil; session = nil; loading = false
         nextProbe = .distantPast

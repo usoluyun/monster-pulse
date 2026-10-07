@@ -4,8 +4,9 @@
 <key>CFBundleIdentifier</key><string>local.monsterpulse</string>
 <key>CFBundleName</key><string>Monster Pulse</string>
 <key>CFBundleExecutable</key><string>MonsterPulse</string>
+<key>CFBundleIconFile</key><string>AppIcon.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleVersion</key><string>2</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

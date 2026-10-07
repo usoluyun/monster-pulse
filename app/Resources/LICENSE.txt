@@ -1,0 +1,13 @@
+Monster / Weidingti Character Artwork
+
+Copyright remains with the original copyright holder. All rights reserved.
+
+AppIcon.svg, AppIcon.icns, the character design, the monochrome / contour-echo
+variants, and any character images derived from them are excluded from the
+repository's MIT License.
+
+Public availability of these files does not grant a license to independently
+reuse, modify, sublicense, or commercially exploit the character artwork.
+Obtain separate permission from the original copyright holder before reuse.
+
+Keep this notice with the artwork. See ../../NOTICE.md for scope and details.

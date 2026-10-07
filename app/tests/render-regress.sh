@@ -177,5 +177,10 @@ if python3 tests/dock-layout-check.py "$WORK"; then
 else
   fail=$((fail+1))
 fi
+if python3 tests/window-render-check.py "$WORK"; then
+  pass=$((pass+1))
+else
+  fail=$((fail+1))
+fi
 echo "结果：PASS $pass / FAIL $fail / SKIP $skip"
 [ "$fail" -eq 0 ] || exit 1

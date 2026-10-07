@@ -11,7 +11,7 @@ Swift + AppKit，零第三方依赖。`app/` 是全部源码，`app/Sources/` �
 | 文件 | 职责 |
 |---|---|
 | `Metrics.swift` | 领域层：额度解析、Codex 子进程查询、系统采样（CPU/内存/磁盘/GPU）、格式化。**不 import AppKit** |
-| `Network.swift` | 系统代理读取、Cloudflare 出口探测、网络数据解析与短倒计时。**不 import AppKit** |
+| `Network.swift` | 应用/系统代理选择、Cloudflare 出口探测、网络数据解析与短倒计时。**不 import AppKit** |
 | `Alerts.swift` | 预警规则与跃迁去重。纯逻辑，不碰 AppKit |
 | `Config.swift` | 配置读写 + 设置窗口 |
 | `DetailsView.swift` | 详情窗口视图 |
@@ -28,7 +28,7 @@ Swift + AppKit，零第三方依赖。`app/` 是全部源码，`app/Sources/` �
 ```sh
 bash app/build.sh                      # Release(-O)，产物在 app/.build/
 app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse --self-test
-bash app/tests/render-regress.sh       # 视觉回归（28 个用例，容差 24）
+bash app/tests/render-regress.sh       # 视觉回归（39 张图 + 2 项语义检查，容差 24）
 bash app/tests/run-abnormal-tests.sh   # 查询失败 10 场景
 bash app/tests/run-termination-tests.sh # 退出路径 2 条
 bash app/tests/run-perf-test.sh        # 性能验收（3 轮，约 75 分钟）
@@ -40,7 +40,7 @@ bash app/tests/run-perf-test.sh        # 性能验收（3 轮，约 75 分钟）
 |---|---|
 | `--self-test` | 全部纯逻辑断言，不联网。系统采样会等计数器变化，最长约 1 秒 |
 | `--probe` | 读真实额度，单次。非零退出即失败，不用模拟值代替 |
-| `--network-probe` | 读真实系统代理并探测出口国家，单次；失败返回非零。终端结果不代替 GUI 启动验证 |
+| `--network-probe` | 优先使用设置中的应用代理，留空时用系统代理，探测出口国家，单次；失败返回非零。终端结果不代替 GUI 启动验证 |
 | `--render-test` | Dock 图标离屏渲染，规格见 `tests/render-regress.sh` 的 `CASES` |
 | `--details-render-test` | 详情窗口离屏渲染：`normal` / `no-data` / `stale` / `error` / `loading` / `*-no-meters` / `no-gpu` |
 | `--settings-render-test` | 设置面板离屏渲染，并输出 `layout:` 诊断（`render-regress.sh` 据此判 FAIL）。状态：`proxy` / `dns` / `nometers` / `alerts-off` / `login-on` / `login-off` / `full` |
@@ -185,7 +185,8 @@ AGENTS.md、README、验证报告和待办。**这条结论从未实测**——�
     `windowBackgroundColor` 所以看不出来，离屏没有窗口就穿帮了。
     `renderToPNG` 现在显式设 `content.layer?.backgroundColor`，且必须在设完
     appearance **之后**取 `cgColor`，否则动态色按当时的当前外观解析，等于白垫。
-    （`DetailsView` 在 `draw()` 里自己填底色，所以它天然没事。）
+    详情夹具的容器也必须垫底色。2026-10-08 检查 README 截图发现其背景透明，
+    已修正并增加 `window-render-check.py` 检查窗口图片的不透明背景与深色外观。
 - **`main.swift` 顶层全局量必须声明在使用之前。** 顶层代码按顺序执行，
   `renderAppearance` 原先声明在文件中部而 `--settings-render-test` 在它之前就读，
   拿到的是 nil——编译器不报错，只有真渲染才看得出。更坑的是它**掩盖了上面那个
@@ -234,3 +235,5 @@ AGENTS.md、README、验证报告和待办。**这条结论从未实测**——�
   **这是未文档化接口，键名无兼容性保证**，读取失败必须返回 nil 而不是猜测。
   实测 service 缓存后单次读约 43–59 微秒、不需要 sudo。**未加 GPU 满载预警**
   （浏览器/视频常年接近满载，默认预警噪音太大）。
+
+- **自检配置必须隔离**：`--self-test` 只能写随机命名的测试 UserDefaults suite。禁止清空应用真实配置域；2026-10-07 发现旧实现会清掉已保存代理。

@@ -47,6 +47,15 @@ check(bool(colored('hide-gpu', 'cpu')) and not colored('hide-gpu', 'gpu'),
       '隐藏 GPU 不应隐藏 CPU')
 check(bool(colored('hide-cpu', 'gpu')) and not colored('hide-cpu', 'cpu'),
       '隐藏 CPU 不应隐藏 GPU')
+# Hidden columns must leave only the icon background, including the old cached track.
+for name, slots in [('hide-cpu', [80]), ('hide-gpu', [104]), ('hide-both', [80, 104])]:
+    w,h,c,data = load(name)
+    for left in slots:
+        samples = [data[(y*w+x)*c:(y*w+x)*c+3]
+                   for y in range(h) for x in range(w)
+                   if left+2 <= x*128/w <= left+11 and 42 <= 128-y*128/h <= 94]
+        check(bool(samples) and all(max(rgb) < 35 for rgb in samples),
+              f'{name} 关闭后必须连底槽一起消失')
 check(load('blink-on') == load('blink-off'), '静态图标不能随历史动画相位改变')
 check(load('no-quota') == load('no-quota-stale'), '无额度快照时不可标成旧数据')
 check(load('gpu-unavailable') != load('zero-load'), '无 GPU 数据必须与零负载区分')

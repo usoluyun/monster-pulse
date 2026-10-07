@@ -90,8 +90,8 @@ struct Config {
                                   proxyURL: "")
 
     /// 每次启动都要调用，把默认值注册进易失域。
-    static func registerDefaults() {
-        UserDefaults.standard.register(defaults: [
+    static func registerDefaults(defaults: UserDefaults = .standard) {
+        defaults.register(defaults: [
             Key.systemInterval: defaultSystemInterval,
             Key.quotaInterval: defaultQuotaInterval,
             Key.showCPU: true,
@@ -106,8 +106,7 @@ struct Config {
         ])
     }
 
-    static func load() -> Config {
-        let d = UserDefaults.standard
+    static func load(defaults d: UserDefaults = .standard) -> Config {
         // 越界值要夹回区间：配置文件可能被手改或来自旧版本，
         // 直接拿去做 Timer 间隔或阈值会让行为不可预期
         let clamp = { (value: Double, range: ClosedRange<Double>, fallback: Double) in
@@ -120,7 +119,7 @@ struct Config {
             quotaInterval: clamp(d.double(forKey: Key.quotaInterval),
                                  quotaIntervalRange, defaultQuotaInterval),
             showCPU: d.bool(forKey: Key.showCPU),
-            showMemory: d.bool(forKey: Key.showMemory),
+            showMemory: true,
             showGPU: d.bool(forKey: Key.showGPU),
             alertsEnabled: d.bool(forKey: Key.alertsEnabled),
             alertQuotaThreshold: clamp(d.double(forKey: Key.alertThreshold),
@@ -290,8 +289,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     // 显示
     private let cpuCheckbox = NSButton(checkboxWithTitle: "在图标与详情中显示 CPU",
                                         target: nil, action: nil)
-    private let memoryCheckbox = NSButton(checkboxWithTitle: "在图标与详情中显示内存",
-                                          target: nil, action: nil)
     private let gpuCheckbox = NSButton(checkboxWithTitle: "在图标与详情中显示 GPU 占用",
                                        target: nil, action: nil)
     // 预警
@@ -314,7 +311,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
                                       target: nil, action: nil)
     private let diskLabel = NSTextField(labelWithString: "")
     // 代理
-    private let proxyTitle = NSTextField(labelWithString: "Codex 代理")
+    private let proxyTitle = NSTextField(labelWithString: "应用代理")
     private let proxyField = NSTextField(string: "")
     /// 用可换行标签：labelWithString 不换行，长提示会被截断（实测过）。
     private let proxyHint = NSTextField(wrappingLabelWithString: "")
@@ -358,7 +355,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         appendSlider(quotaLabel, quotaSlider, height: 17, gapBefore: 8)
 
         append(heading("显示"), height: 15, gapBefore: 20)
-        for box in [cpuCheckbox, memoryCheckbox, gpuCheckbox] {
+        for box in [cpuCheckbox, gpuCheckbox] {
             box.target = self
             box.action = #selector(checkboxChanged(_:))
             append(box, height: 20, gapBefore: box === cpuCheckbox ? 10 : 4)
@@ -387,7 +384,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         rows.append(Row(view: proxyField, height: 20, gapBefore: -17, width: nil))
         proxyHint.font = .systemFont(ofSize: 10)
         proxyHint.textColor = .secondaryLabelColor
-        proxyHint.stringValue = "留空则不设代理。本应用从 Dock 启动、不经过 shell，因此读不到 .zshrc 里的代理。"
+        proxyHint.stringValue = "用于 Codex 查询和出口 IP 探测。留空时出口探测使用系统代理；不读取 shell 代理。"
         content.addSubview(proxyHint)
         // 两行高度：提示文案较长，单行会被截断
         rows.append(Row(view: proxyHint, height: 30, gapBefore: 5, width: nil))
@@ -522,7 +519,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             proxyHint.stringValue = "将使用：\(normalized)"
             proxyHint.textColor = .secondaryLabelColor
         } else if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            proxyHint.stringValue = "留空则不设代理。本应用从 Dock 启动、不经过 shell，因此读不到 .zshrc 里的代理。"
+            proxyHint.stringValue = "用于 Codex 查询和出口 IP 探测。留空时出口探测使用系统代理；不读取 shell 代理。"
             proxyHint.textColor = .secondaryLabelColor
         } else {
             proxyHint.stringValue = "无法识别为代理地址，将按不设代理处理"
@@ -536,7 +533,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         systemSlider.doubleValue = config.systemInterval
         quotaSlider.doubleValue = config.quotaInterval
         cpuCheckbox.state = config.showCPU ? .on : .off
-        memoryCheckbox.state = config.showMemory ? .on : .off
         gpuCheckbox.state = config.showGPU ? .on : .off
         alertsCheckbox.state = config.alertsEnabled ? .on : .off
         thresholdSlider.doubleValue = config.alertQuotaThreshold
@@ -640,8 +636,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     @objc private func checkboxChanged(_ sender: NSButton) {
         if sender === cpuCheckbox {
             config.setShowCPU(sender.state == .on)
-        } else if sender === memoryCheckbox {
-            config.setShowMemory(sender.state == .on)
         } else if sender === gpuCheckbox {
             config.setShowGPU(sender.state == .on)
         } else {

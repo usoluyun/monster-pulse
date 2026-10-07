@@ -74,9 +74,11 @@ if [ "$MODE" = "standalone" ]; then
 fi
 
 rm -rf "$APP"
-mkdir -p "${APP}/Contents/MacOS"
+mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 build_for "$ARCH" "$BIN"
 cp Info.plist "${APP}/Contents/Info.plist"
+cp Resources/AppIcon.icns "${APP}/Contents/Resources/AppIcon.icns"
+cp Resources/LICENSE.txt "${APP}/Contents/Resources/LICENSE.txt"
 printf '%s\n' "Built: $PWD/${APP}"
 
 if [ "$SIGN" = "1" ]; then
