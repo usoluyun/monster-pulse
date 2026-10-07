@@ -130,6 +130,10 @@ Dock 启动就永远查询超时。**我在终端验证了很多轮，方向完�
   `https://developer.apple.com/documentation/appkit/nswindow/isreleasedwhenclosed.md`。
   大小写规则不统一且无推导规律，须传 Swift 源码里的原始符号名，404 再试全小写。
   详见 chezmoi 的 `apple-docs` skill。
+- **离屏渲染必须钉死外观**：视图不在窗口里时 `labelColor` 等动态颜色解析不出来，
+  文字被画成白色，而窗口背景跟随系统外观也是白色，白字白底——浅色下渲染出的
+  PNG 一个字都没有。三个 `--*-render-test` 都已钉 `darkAqua`。
+  **注意别用「每次先 --update 重建基准图」掩盖外观变化**，那样这个依赖永远发现不了。
 - **CPU tick 计数器约每秒才更新一次**（实测零增量比例：10ms 为 13/15、200ms 为
   6/15、1000ms 为 0/15）。任何短于 1 秒的 CPU 采样都拿不到值，别为此设计动效。
 - **`pageins`/`pageouts` 是亚秒级更新的**，可算磁盘 I/O 速率；已实测读 684MB
@@ -149,4 +153,9 @@ Dock 启动就永远查询超时。**我在终端验证了很多轮，方向完�
   额度数字真正可读，标题与进度轨基本不可见——真要做需先定可读性预算。
 - 内存压力等级（`kern.memorystatus_vm_pressure_level()`）**公开拿不到**：无 SDK
   header 且符号未导出；`DISPATCH_SOURCE_TYPE_MEMORYPRESSURE` 是公开 API 但只在
-  状态变化时通知，不能用于显示。用户真正关心的是跑本地大模型时的磁盘 I/O。
+  状态变化时通知，不能用于显示。
+- **跑本地大模型时的负载在 GPU 侧**，实测推理时 GPU 100% 而 CPU 仅 6–17%、
+  磁盘归零。GPU 走 `GPUSampler`（IOKit 的 `IOAccelerator` → `PerformanceStatistics`），
+  **这是未文档化接口，键名无兼容性保证**，读取失败必须返回 nil 而不是猜测。
+  实测 service 缓存后单次读约 43–59 微秒、不需要 sudo。**未加 GPU 满载预警**
+  （浏览器/视频常年接近满载，默认预警噪音太大）。
