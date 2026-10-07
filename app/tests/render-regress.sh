@@ -27,20 +27,24 @@ trap 'rm -rf "$WORK"' EXIT
 # extras 可选，形如 pace=0.45,activity=0.8，用于覆盖动效分支；留空则不画动效，
 # 这样既有基准图不会因为新增动效而全量失效。
 CASES=(
-  # 新签名：<name>:<levels>:<phase>
-  # levels: 三个 0~100 的数（CPU,GPU,Quota），-1 = 该点 present=false 不画
-  # phase: 心跳相位 0~1，控制各点处于包络的峰或谷
-  "idle:0,0,0:0.5"
-  "cpu-only:70,0,0:0.17"
-  "gpu-only:0,95,0:0.17"
-  "quota-only:0,0,50:0.17"
-  "all-mid:40,55,20:0.17"
-  "peak-frame:40,55,20:0.17"
-  "valley-frame:40,55,20:0.62"
-  "full:100,100,100:0.17"
-  "no-quota:60,40,-1:0.17"
-  "no-meters:-1,-1,30:0.17"
-  "empty:-1,-1,-1:0.5"
+  # 签名：<name>:<beats>:<rails>:<meters>:<phase>
+  #   beats:  CPU,GPU,Quota 忙碌等级 0~100（-1 = 不画该点）
+  #   rails:  used/elapsed,used/elapsed（"none" = 无轨；elapsed=-1 无刻度）
+  #   meters: both / no-cpu / no-gpu / no-both
+  #   phase:  心跳相位 0~1（0.17 = 峰，0.62 = 谷）
+  #
+  # 计量条的值由 beats 前两位推导（CPU 点 level 即占用），夹具不会自相矛盾。
+  "idle:0,0,0:0.35/0.42,0.12/0.30:both:0.5"
+  "typical:40,85,20:0.35/0.42,0.12/0.30:both:0.17"
+  "valley:40,85,20:0.35/0.42,0.12/0.30:both:0.62"
+  "gpu-busy:10,98,45:0.55/0.30,0.12/0.18:both:0.17"
+  "burning:20,10,50:0.55/0.30,0.12/0.18:both:0.17"
+  "full:100,100,100:1.0/1.0,1.0/1.0:both:0.17"
+  "no-quota:60,40,-1:none:both:0.17"
+  "no-meters:-1,-1,30:0.35/0.42,0.12/0.30:no-both:0.17"
+  "hide-cpu:40,85,20:0.35/0.42,0.12/0.30:no-cpu:0.17"
+  "hide-gpu:40,85,20:0.35/0.42,0.12/0.30:no-gpu:0.17"
+  "no-tick:40,85,20:0.35/-1,0.12/-1:both:0.17"
 )
 
 # 详情窗口的用例。规格只有状态名，由应用内部决定该状态的数据，
@@ -73,8 +77,8 @@ SETTINGS_CASES=(
 mkdir -p "$BASE"
 if [ "${1:-}" = "--update" ]; then
   for spec in "${CASES[@]}"; do
-    IFS=':' read -r name levels phase <<<"$spec"
-    "$APP" --render-test "$BASE/$name.png" "$levels" "$phase" >/dev/null \
+    IFS=':' read -r name levels rails meters phase <<<"$spec"
+    "$APP" --render-test "$BASE/$name.png" "$levels" "$rails" "$meters" "$phase" >/dev/null \
       && echo "  基线已更新 $name"
   done
   for state in "${DETAILS_CASES[@]}"; do
@@ -111,8 +115,8 @@ compare() {   # compare <名称> <渲染出的文件>
 
 echo "Dock 图标视觉回归（容差 ${TOL}）"
 for spec in "${CASES[@]}"; do
-  IFS=':' read -r name levels phase <<<"$spec"
-  "$APP" --render-test "$WORK/$name.png" "$levels" "$phase" >/dev/null
+  IFS=':' read -r name levels rails meters phase <<<"$spec"
+  "$APP" --render-test "$WORK/$name.png" "$levels" "$rails" "$meters" "$phase" >/dev/null
   compare "$name" "$WORK/$name.png"
 done
 
