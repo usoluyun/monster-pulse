@@ -39,7 +39,7 @@ bash app/tests/run-perf-test.sh        # 性能验收（3 轮，约 75 分钟）
 |---|---|
 | `--self-test` | 全部纯逻辑断言，不联网。系统采样会等计数器变化，最长约 1 秒 |
 | `--probe` | 读真实额度，单次。非零退出即失败，不用模拟值代替 |
-| `--render-test` | Dock 图标离屏渲染，规格见 `tests/render-regress.sh` 的 `CASES` |
+| `--render-test` | Dock 图标离屏渲染，用法 `<out> <levels> <phase>`：levels 是三个 0~100 的忙碌等级（CPU,GPU,Quota，-1=不画该点），phase 是心跳相位 |
 | `--details-render-test` | 详情窗口离屏渲染：`normal` / `no-data` / `stale` / `error` / `loading` / `*-no-meters` / `no-gpu` |
 | `--settings-render-test` | 设置面板离屏渲染，并输出 `layout:` 诊断（`render-regress.sh` 据此判 FAIL）。状态：`proxy` / `dns` / `nometers` / `alerts-off` / `login-on` / `login-off` / `full` |
 | `--dock-menu-dump` | 打印 Dock 菜单的启用态、标题与 action 选择器，人工点验时的对照依据 |
@@ -218,12 +218,14 @@ AGENTS.md、README、验证报告和待办。**这条结论从未实测**——�
 - **额度预警用 Dock 图标跳动，不用系统横幅通知**（同上）。理由是可测的：横幅通知
   在 ad-hoc 签名下授权恒定失败，且无 bundle 时 `current()` 抛的 ObjC 异常
   Swift 接不住，会让 `--standalone` 产物崩溃。
-- **视觉设计暂缓**（用户 2026-10-06 决定）。Dock 静止尺寸是 43pt，实测当前只有
-  额度数字真正可读，标题与进度轨基本不可见——真要做需先定可读性预算。
-  2026-10-07 按用户要求给 Dock 图标加了 GPU 计量条（三根：CPU 青 / GPU 绿 /
-  内存紫，间距从 13 收到 10、条高 7→6），但**可读性预算的问题依然没解决**：
-  43pt 下三根条只剩色块，能分辨「GPU 满不满」但读不出数值。这次是加信息量，
-  不是重做视觉，Monster 角色形象仍暂缓。
+- **视觉设计暂缓**（用户 2026-10-06 决定）。Monster 角色形象仍暂缓。
+- **Dock 图标改为纯心跳点阵**（用户 2026-10-07 决定）：CODEX 标题、额度大数字、
+  额度轨、计量条全部撤掉，只剩三个心跳点（CPU 青 / GPU 绿 / Codex 额度 琥珀），
+  **跳速映射忙碌度**（0.35–2 Hz）。数字信息全部移到右键菜单与详情窗口。
+  额度点的忙碌度用**消耗速率**（相邻两次查询的用量差 ÷ 时间差，相对线性 pace，
+  2 倍线性 = 满心跳），不用存量（used%）——存量是「用了多少」，速率才是「在不在忙」。
+  曾试过用「消耗超前时间进度」（used% − elapsed%），那是报警语义：上午猛用一波、
+  下午停手，点还会跳几个小时，和 CPU/GPU 点的繁忙语义不一致。
 - 内存压力等级（`kern.memorystatus_vm_pressure_level()`）**公开拿不到**：无 SDK
   header 且符号未导出；`DISPATCH_SOURCE_TYPE_MEMORYPRESSURE` 是公开 API 但只在
   状态变化时通知，不能用于显示。
