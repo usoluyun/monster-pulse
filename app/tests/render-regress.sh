@@ -3,7 +3,8 @@
 #
 # 用法：
 #   tests/render-regress.sh            # 渲染当前版本并与 tests/baseline/ 比对
-#   tests/render-regress.sh --update   # 用当前构建重新生成基准（源码有改动后应先跑这个）
+#   tests/render-regress.sh --update   # 确认外观后更新全部基准
+#   tests/render-regress.sh --update-dock # 仅更新 Dock 基准，保留窗口基准
 #
 # 容差默认 24，不是 1。原因是实测发现：CoreText 文字抗锯齿依赖编译产物，
 # 同一二进制两次渲染完全一致，但重新编译后文字像素最大差约 22/255。所以容差必须
@@ -21,44 +22,50 @@ TOL="${TOL:-24}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# 规格固定 7 段：名称:额度:CPU:内存:stale:meters:extras
-# 段数必须固定，否则 IFS=':' read 会因空段吞掉后面的字段（实测踩过）。
-# meters 取值 both / no-cpu / no-mem / no-both，用于覆盖配置关掉指标后的图标外观。
-# extras 可选，形如 pace=0.45,activity=0.8，用于覆盖动效分支；留空则不画动效，
-# 这样既有基准图不会因为新增动效而全量失效。
+# 规格固定 6 段：名称:额度:CPU:stale:meters:extras。
+# activity 为历史参数；两个相位必须渲染成同一张静态图。
 CASES=(
   # 新签名：<remaining> <cpu> <stale|none> <meters> <extras>
   # extras: gpu= / rail=<used>/<elapsed>（5h轨，elapsed 传 -1 画无刻度）/
-  #         rail2=<used>/<elapsed>（周轨）/ activity=闪烁相位 / nogpu / nogpumeter
+  #         rail2=<used>/<elapsed>（周轨）/ activity=历史相位（忽略）/ nogpu / nogpumeter
   # meters: both / no-cpu / no-gpu / no-both
   #
   # rail 与 rail2 是额度轨（bullet graph）：填充=已用%，刻度=时间已过%。
   # 两条轨默认都给典型值——不给的话退化为「无额度数据」外观，与真实使用不符。
-  "normal-92:92:0.42:none:both:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30"
-  "low-cpu-45:45:0.08:none:both:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30"
-  "full-100:100:1.0:stale:both:gpu=1.0,rail=1.0/1.0,rail2=1.0/1.0"
-  "stale:88:0.42:stale:both:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30"
-  "no-data:92:0:none:both:gpu=0.12"
-  "hide-cpu:92:0.42:none:no-cpu:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30"
-  "hide-gpu:92:0.42:none:no-gpu:gpu=0.5,rail=0.35/0.42,rail2=0.12/0.30"
-  "hide-both:92:0.42:none:no-both:gpu=0.5,rail=0.35/0.42,rail2=0.12/0.30"
+  "normal-92:92:0.42:none:both:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
+  "low-cpu-45:45:0.08:none:both:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
+  "full-100:100:1.0:stale:both:gpu=1.0,rail=1.0/1.0,rail2=1.0/1.0,country=US,proxy=on,reset=10800"
+  "stale:88:0.42:stale:both:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
+  "no-data:92:0:none:both:gpu=0.12,country=US,proxy=on,reset=10800"
+  "hide-cpu:92:0.42:none:no-cpu:gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
+  "hide-gpu:92:0.42:none:no-gpu:gpu=0.5,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
+  "hide-both:92:0.42:none:no-both:gpu=0.5,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
   # 无额度数据：remaining 传 nil（渲染成横杠）。stale 与 no-quota-stale 断言
   # 「没有数字时不该标 OLD」；无轨状态下背板也不画轨底槽（backdropRails 机制）。
-  "no-quota:nil:0.42:none:both:gpu=0.12"
-  "no-quota-stale:nil:0.42:stale:both:gpu=0.12"
-  # 闪烁相位两个极端：亮与暗。activity= 同时代入 pulse。
-  "blink-on:62:0.42:none:both:gpu=0.55,rail=0.35/0.42,rail2=0.12/0.30,activity=0.2"
-  "blink-off:62:0.42:none:both:gpu=0.55,rail=0.35/0.42,rail2=0.12/0.30,activity=0.7"
-  # 低于忙碌阈值不画闪点（activity 相位亮也无点）
-  "idle-nodot:62:0.01:none:both:gpu=0.01,rail=0.35/0.42,rail2=0.12/0.30,activity=0.2"
+  "no-quota:nil:0.42:none:both:gpu=0.12,country=US,proxy=on,reset=10800"
+  "no-quota-stale:nil:0.42:stale:both:gpu=0.12,country=US,proxy=on,reset=10800"
+  # 历史动效相位不再影响外观。
+  "blink-on:62:0.42:none:both:gpu=0.55,rail=0.35/0.42,rail2=0.12/0.30,activity=0.2,country=US,proxy=on,reset=10800"
+  "blink-off:62:0.42:none:both:gpu=0.55,rail=0.35/0.42,rail2=0.12/0.30,activity=0.7,country=US,proxy=on,reset=10800"
+  # 低负载仍显示固定底槽。
+  "idle-nodot:62:0.01:none:both:gpu=0.01,rail=0.35/0.42,rail2=0.12/0.30,activity=0.2,country=US,proxy=on,reset=10800"
   # 跑本地大模型：CPU 低、GPU 满。这是这套图标最该被一眼看出来的场景。
-  "gpu-busy:62:0.10:none:both:gpu=0.98,rail=0.35/0.42,rail2=0.12/0.30,activity=0.2"
+  "gpu-busy:62:0.10:none:both:gpu=0.98,rail=0.35/0.42,rail2=0.12/0.30,activity=0.2,country=US,proxy=on,reset=10800"
   # 烧得快：used(0.55) > elapsed(0.30)+0.05 → 5h 轨转琥珀色
-  "burning:62:0.10:none:both:gpu=0.98,rail=0.55/0.30,activity=0.2"
+  "burning:62:0.10:none:both:gpu=0.98,rail=0.55/0.30,activity=0.2,country=US,proxy=on,reset=10800"
   # 周轨单独变化：只给 rail 不给 rail2 → 只有 5h 轨有底槽
-  "single-rail:62:0.42:none:both:gpu=0.12,rail=0.35/0.42"
+  "single-rail:62:0.42:none:both:gpu=0.12,rail=0.35/0.42,country=US,proxy=on,reset=10800"
   # 刻度缺失（无 resetsAt 时间信息）→ 填充照画、刻度不画
-  "no-tick:62:0.42:none:both:gpu=0.12,rail=0.35/-1,rail2=0.12/-1"
+  "no-tick:62:0.42:none:both:gpu=0.12,rail=0.35/-1,rail2=0.12/-1,country=US,proxy=on,reset=10800"
+  "gpu-unavailable:62:0:none:both:nogpu,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
+  "cpu-full:62:1:none:both:gpu=0,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
+  "gpu-full:62:0:none:both:gpu=1,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
+  "zero-load:62:0:none:both:gpu=0,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
+  "network-off:62:0.12:none:both:gpu=1,rail=0.38/0.45,rail2=0.26/0.32,country=CN,proxy=off,reset=1800"
+  "network-unknown:62:0.12:none:both:gpu=1,rail=0.38/0.45,rail2=0.26/0.32,proxy=unknown"
+  "quota-empty:0:0:none:both:gpu=0,country=US,proxy=on"
+  "quota-full:100:0:none:both:gpu=0,country=US,proxy=on"
+
 )
 
 # 详情窗口的用例。规格只有状态名，由应用内部决定该状态的数据，
@@ -89,12 +96,15 @@ SETTINGS_CASES=(
 )
 
 mkdir -p "$BASE"
-if [ "${1:-}" = "--update" ]; then
+if [ "${1:-}" = "--update" ] || [ "${1:-}" = "--update-dock" ]; then
   for spec in "${CASES[@]}"; do
-    IFS=':' read -r name r c m st meters extras <<<"$spec"
-    "$APP" --render-test "$BASE/$name.png" "$r" "$c" "$m" "$st" "$meters" "$extras" >/dev/null \
+    IFS=':' read -r name r c st meters extras <<<"$spec"
+    "$APP" --render-test "$BASE/$name.png" "$r" "$c" "$st" "$meters" "$extras" >/dev/null \
       && echo "  基线已更新 $name"
   done
+  if [ "${1:-}" = "--update-dock" ]; then
+    echo "Dock 基准图写入 $BASE"; exit 0
+  fi
   for state in "${DETAILS_CASES[@]}"; do
     "$APP" --details-render-test "$BASE/$state.png" "${state#details-}" >/dev/null \
       && echo "  基线已更新 $state"
@@ -129,8 +139,8 @@ compare() {   # compare <名称> <渲染出的文件>
 
 echo "Dock 图标视觉回归（容差 ${TOL}）"
 for spec in "${CASES[@]}"; do
-  IFS=':' read -r name r c m st meters extras <<<"$spec"
-  "$APP" --render-test "$WORK/$name.png" "$r" "$c" "$m" "$st" "$meters" "$extras" >/dev/null
+  IFS=':' read -r name r c st meters extras <<<"$spec"
+  "$APP" --render-test "$WORK/$name.png" "$r" "$c" "$st" "$meters" "$extras" >/dev/null
   compare "$name" "$WORK/$name.png"
 done
 
@@ -162,5 +172,10 @@ for state in "${SETTINGS_CASES[@]}"; do
 done
 
 echo
+if python3 tests/dock-layout-check.py "$WORK"; then
+  pass=$((pass+1))
+else
+  fail=$((fail+1))
+fi
 echo "结果：PASS $pass / FAIL $fail / SKIP $skip"
 [ "$fail" -eq 0 ] || exit 1

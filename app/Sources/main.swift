@@ -375,6 +375,20 @@ func verify() throws {
         failures.append("不设代理时不应改动环境")
     }
 
+    for key in ["HTTPEnable", "HTTPSEnable", "SOCKSEnable", "ProxyAutoConfigEnable", "ProxyAutoDiscoveryEnable"] {
+        if NetworkStatus.proxyEnabled([key: 1]) != true { failures.append("系统代理开关 \(key)") }
+    }
+    if NetworkStatus.proxyEnabled(["HTTPProxy": "localhost", "HTTPEnable": 0]) != false { failures.append("代理地址不能当成开启") }
+    if NetworkStatus.proxyEnabled(nil) != nil { failures.append("无法读取代理时不能报关闭") }
+    if NetworkStatus.parseTrace("ip=203.0.113.1\nloc=US\ncolo=HKG")?.country != "US" { failures.append("国家要读 loc 而不是 colo") }
+    if NetworkStatus.parseTrace("ip=2001:db8::1\nloc=HK")?.country != "HK" { failures.append("IPv6 出口解析") }
+    for invalid in ["ip=bad\nloc=US", "ip=203.0.113.1\nloc=XX", "ip=203.0.113.1\nloc=bad", "loc=US"] {
+        if NetworkStatus.parseTrace(invalid) != nil { failures.append("无效出口探测不可猜国家") }
+    }
+    for (seconds, expected) in [(0.0, "0m"), (59.0, "1m"), (120.0, "2m"), (3601.0, "2h"), (86401.0, "2d")] {
+        expect(NetworkStatus.resetLabel(now.addingTimeInterval(seconds), now: now) ?? "?", expected, "短重置倒计时")
+    }
+
     if !failures.isEmpty {
         for line in failures { fputs("FAIL  \(line)\n", stderr) }
         throw ReadError.message("自检失败 \(failures.count) 项")
@@ -385,6 +399,17 @@ func verify() throws {
 if CommandLine.arguments.contains("--self-test") {
     do { try verify(); exit(0) } catch { fputs("\(error.localizedDescription)\n", stderr); exit(1) }
 }
+if CommandLine.arguments.contains("--network-probe") {
+    let monitor = NetworkMonitor()
+    monitor.poll(force: true) {
+        guard !monitor.loading else { return }
+        print("country=\(monitor.exit?.country ?? "?") proxy=\(monitor.proxyEnabled.map { $0 ? "on" : "off" } ?? "unknown")")
+        exit(monitor.exit == nil ? 1 : 0)
+    }
+    RunLoop.main.run()
+    exit(1)
+}
+
 if CommandLine.arguments.contains("--draw-bench") {
     // 量化单次 draw 成本，用来定低帧率动效的帧率预算。
     // Dock 图标走 dockTile 离屏渲染，没有 GPU 合成可借力——每帧都要 CPU 重画，
@@ -436,13 +461,13 @@ if CommandLine.arguments.contains("--render-test") {
     let legacy = Double(fourth) != nil
     view.stale = legacy ? (args.count > 4 && args[4] == "stale")
                         : (fourth == "stale")
-    let metersSlot = legacy ? 5 : (fourth == "stale" ? 5 : 4)
+    let metersSlot = legacy ? 5 : 4
     if args.count > metersSlot {
         let meters = args[metersSlot]
-        view.showCPU = meters != "no-cpu" && meters != "no-both" && meters != "no-gpu"
+        view.showCPU = meters != "no-cpu" && meters != "no-both"
         view.showGPU = meters != "no-gpu" && meters != "no-both"
     }
-    // extras：activity=亮点相位 / gpu=占用 / rail=<used>/<elapsed>（主窗口轨）/
+    // extras：gpu=占用 / rail=<used>/<elapsed>（主窗口轨）/
     // rail2=<used>/<elapsed>（周窗口轨）。elapsed 传 -1 表示无时间信息。
     let extrasSlot = metersSlot + 1
     let extras = args.count > extrasSlot ? args[extrasSlot].split(separator: ",").map(String.init) : []
@@ -454,6 +479,13 @@ if CommandLine.arguments.contains("--render-test") {
         // 让夹具悄悄退化成另一种状态。
         let parts = extra.split(separator: "=", maxSplits: 1).map(String.init)
         let key = parts[0]
+        if key == "country", parts.count == 2 { view.country = parts[1]; continue }
+        if key == "proxy", parts.count == 2 { view.proxyEnabled = parts[1] == "on" ? true : (parts[1] == "off" ? false : nil); continue }
+        if key == "reset", parts.count == 2, let seconds = Double(parts[1]) {
+            let now = Date(timeIntervalSince1970: 1_767_225_600)
+            view.resetLabel = NetworkStatus.resetLabel(now.addingTimeInterval(seconds), now: now)
+            continue
+        }
         if key == "nogpu" { view.gpu = nil; continue }
         if key == "nogpumeter" { view.showGPU = false; continue }
         if key == "rail" || key == "rail2" {
@@ -470,7 +502,6 @@ if CommandLine.arguments.contains("--render-test") {
             continue
         }
         guard parts.count == 2, let value = Double(parts[1]) else { continue }
-        if key == "activity" { view.activity = value; view.pulse = value }
         if key == "gpu" { view.gpu = value }
     }
     let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
@@ -700,34 +731,15 @@ final class DockView: NSView {
     var showGPU = true
     /// 额度轨：[0] = 5 小时主窗口，[1] = 周窗口。缺失的窗口不画。
     var rails: [Rail] = []
-    /// CPU 忙碌度（0...1），驱动条内亮点的脉动。nil 表示无读数。
-    ///
-    /// 注意这个值的时效性：host_statistics 的 CPU tick 计数器约每秒才更新一次
-    /// （实测间隔 10ms 时零增量 13/15、200ms 时 6/15、1000ms 时 0/15），所以它
-    /// 是约 1 秒粒度的最近读数。因此亮点的**速度映射没有意义**——它表达的是
-    /// 「当前忙碌程度」这一状态，不是「忙碌变化有多快」。
-    var activity: Double?
-    /// 亮点脉动相位（0...1），由 10fps 动画定时器推进。
-    var pulse: Double = 0
-
-    // Dock 图标走 dockTile 离屏渲染，没有 GPU 合成可借力，每次 display 都要 CPU 重画。
-    // 静态部分（背景、进度条底槽）与数字文字的排版是主要开销——后者每次都要重跑
-    // 段落布局。预渲染成位图后重绘只剩位图拷贝，为后续低帧率动效腾出预算。
-    /// 低于此占用视为「闲着」，不画闪点、也不启动动画定时器。
-    static let busyThreshold = 0.02
-    /// 方波闪烁。`pulse` 每秒推进 1.0，这里取占空比约 45% 的一格。
-    ///
-    /// 刻意用方波而不是正弦淡入淡出：小尺寸下平滑渐变读起来是「缓慢呼吸」，
-    /// 而「在闪 / 不闪」这个二元对比才是一眼能分辨的状态。
-    static func blinkAlpha(_ pulse: Double) -> CGFloat {
-        let phase = (pulse.truncatingRemainder(dividingBy: 1) + 1)
-            .truncatingRemainder(dividingBy: 1)
-        return phase < 0.45 ? 1.0 : 0.15
-    }
-
+    var country: String?
+    var proxyEnabled: Bool?
+    var resetLabel: String?
+    // Dock 采用静态分栏；负载只在系统采样变化时重绘。
+    // 缓存背景与字形，避免重复排版。
     private static let paragraph: NSParagraphStyle = {
         let style = NSMutableParagraphStyle()
         style.alignment = .center
+        style.lineBreakMode = .byClipping
         return style
     }()
 
@@ -736,51 +748,60 @@ final class DockView: NSView {
     private var backdropSize: CGSize = .zero
     private var backdropRails = 0
     private var glyphs: [String: NSImage] = [:]
-    /// glyph 缓存的条目上限。字典本身没有上界：额度百分比会随时间变化，
-    /// 每个新值都是一条新 key。实测单条 glyph 位图约 76 KB（120×41 @2x），
-    /// 取值域上限 104 条（百分比 0…100 加三种标题、两种颜色）合计约 8 MB。
-    /// 不设上界的话，跑久了会把这 8 MB 慢慢吃满。超过上限时整体丢弃重建，
-    /// 代价只是重新排版一次，远小于长期占着几 MB。
+    /// 字形缓存有上限，额度变化时不持续积累位图；超过上限整体重建。
     private static let glyphCacheLimit = 24
 
     // 数字只在变化时重排，key 覆盖「文本+字号+颜色」，取值域有界（百分比 0…100）
-    private func drawGlyph(_ text: String, at y: CGFloat, size: CGFloat, color: NSColor) {
-        let key = "\(text)|\(size)|\(color.description)"
+    private func drawGlyph(_ text: String, in rect: NSRect, size: CGFloat, color: NSColor) {
+        let key = "\(text)|\(rect.width)|\(size)|\(color.description)"
         let image: NSImage
         if let hit = glyphs[key] {
             image = hit
         } else {
-            image = NSImage(size: NSSize(width: 120, height: size + 9), flipped: false) { rect in
+            image = NSImage(size: NSSize(width: rect.width, height: size + 9), flipped: false) { rect in
+                let baseFont = NSFont.monospacedDigitSystemFont(ofSize: size, weight: .semibold)
+                let textWidth = (text as NSString).size(withAttributes: [.font: baseFont]).width
+                let fittedSize = textWidth > rect.width - 2
+                    ? size * (rect.width - 2) / textWidth : size
                 (text as NSString).draw(in: rect, withAttributes: [
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: .semibold),
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: fittedSize, weight: .semibold),
                     .foregroundColor: color, .paragraphStyle: DockView.paragraph])
                 return true
             }
             if glyphs.count >= Self.glyphCacheLimit { glyphs.removeAll() }
             glyphs[key] = image
         }
-        image.draw(in: NSRect(x: 4, y: y, width: 120, height: size + 9))
+        image.draw(in: rect)
     }
 
-    /// 计量条槽位数。CPU / GPU 各占一个固定槽位。
-    ///
-    /// 内存从图标里去掉了（用户判断它不重要），所以槽位从 3 回到 2，
-    /// 每根得以回到 7pt 高——加 GPU 那次为了塞下第三根压到了 6pt。
+    /// 128pt 画布缩到 43pt：左侧额度数字，右侧 CPU / GPU 固定竖柱。
+    /// 两根柱约 5pt 宽、23pt 高；填充始终由下向上，关掉一项不挪另一项。
     static let meterSlots = 2
-    static let meterHeight: CGFloat = 7
-    private static let meterPitch: CGFloat = 11
     static func meterRect(slot: Int) -> NSRect {
-        NSRect(x: 19, y: 25 - CGFloat(slot) * Self.meterPitch,
-               width: 90, height: Self.meterHeight)
+        NSRect(x: 80 + CGFloat(slot) * 24, y: 38, width: 13.5, height: 60)
     }
 
-    /// 额度轨几何。两条轨紧贴大数字下方，视觉上归属「额度」，
-    /// 与下方彩色计量条（机器负载）明确分组。
-    static let railWidth: CGFloat = 90
-    static let railX: CGFloat = 19
-    static let railHeight: CGFloat = 3
+    /// 底部独立的额度区：上轨 5h、下轨周额度，填充为已用比例。
+    static let railWidth: CGFloat = 98
+    static let railX: CGFloat = 15
+    static let railHeight: CGFloat = 6
     static func railRect(_ index: Int) -> NSRect {
-        NSRect(x: railX, y: 42 - CGFloat(index) * 6, width: railWidth, height: railHeight)
+        NSRect(x: railX, y: 26 - CGFloat(index) * 15, width: railWidth, height: railHeight)
+    }
+
+    /// 无读数时用斜纹区分「不可用」与零负载；关闭的指标仅保留底槽。
+    private func drawUnavailable(in rect: NSRect) {
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3).addClip()
+        NSColor.gray.setStroke()
+        let hatch = NSBezierPath()
+        hatch.lineWidth = 2
+        for offset in stride(from: -rect.height, through: rect.width, by: 9) {
+            hatch.move(to: NSPoint(x: rect.minX + offset, y: rect.minY))
+            hatch.line(to: NSPoint(x: rect.minX + offset + rect.height, y: rect.maxY))
+        }
+        hatch.stroke()
+        NSGraphicsContext.restoreGraphicsState()
     }
 
     private func makeBackdrop() -> NSImage {
@@ -813,47 +834,61 @@ final class DockView: NSView {
         }
         backdrop?.draw(in: bounds)
 
-        // 「旧」标记只在真有数字时出现。没有额度数据时 remaining 为 nil，
-        // 此时标 OLD 等于声称存在一份旧快照，而实际上没有——首次查询失败时
-        // 就是这种情况。横杠「—」本身已经表达了不可用。
+        // 旧快照的数字变橙色；首次查询失败没有快照，只画中性的横杠。
         let markStale = stale && remaining != nil
-        drawGlyph(markStale ? "CODEX · OLD" : "CODEX", at: 91, size: 11, color: .lightGray)
-        drawGlyph(remaining.map { "\($0)%" } ?? "—", at: 48, size: 32,
-                  color: markStale ? .systemOrange : .white)
+        let ringRect = NSRect(x: 13, y: 40, width: 57, height: 57)
+        let ringCenter = NSPoint(x: ringRect.midX, y: ringRect.midY)
+        let radius: CGFloat = 28.5
+        let track = NSBezierPath(ovalIn: ringRect)
+        track.lineWidth = 6
+        NSColor.darkGray.setStroke(); track.stroke()
+        if let remaining, remaining > 0 {
+            let arc = NSBezierPath()
+            arc.lineWidth = 6
+            arc.appendArc(withCenter: ringCenter, radius: radius, startAngle: 90,
+                          endAngle: 90 - CGFloat(min(100, max(0, remaining))) * 3.6,
+                          clockwise: true)
+            (markStale || remaining <= 15 ? NSColor.systemOrange : NSColor.white).setStroke()
+            arc.stroke()
+        }
+        let numberSize: CGFloat = (remaining ?? 0) >= 100 ? 21 : 25
+        drawGlyph(remaining.map(String.init) ?? "—",
+                  in: NSRect(x: 17, y: 52, width: 38, height: numberSize + 9),
+                  size: numberSize, color: markStale ? .systemOrange : .white)
+        if remaining != nil {
+            drawGlyph("%", in: NSRect(x: 54, y: 57, width: 12, height: 20),
+                      size: 11, color: markStale ? .systemOrange : .white)
+        }
+        // 左上角网络状态：国家代码与系统代理开关独立显示。
+        drawGlyph(country ?? "?", in: NSRect(x: 14, y: 92, width: 37, height: 28),
+                  size: 19, color: .white)
+        let dot = NSRect(x: 55, y: 104, width: 8, height: 8)
+        if let enabled = proxyEnabled {
+            let shape = NSBezierPath(ovalIn: dot)
+            if enabled { NSColor.white.setFill(); shape.fill() }
+            else { NSColor.gray.setStroke(); shape.lineWidth = 2; shape.stroke() }
+        } else {
+            NSColor.gray.setFill()
+            NSBezierPath(rect: NSRect(x: 55, y: 107, width: 8, height: 2)).fill()
+        }
+        if let resetLabel {
+            drawGlyph(resetLabel, in: NSRect(x: 76, y: 96, width: 42, height: 23),
+                      size: 14, color: .lightGray)
+        }
 
-        // 进度条填充随 cpu/memory 每 5 秒变，形状简单，保持实时绘制。
-        // 每个指标占固定槽位（CPU 上、内存下），关闭某项时另一项不移动，
-        // 避免用户切开关时图标里另一根条跳位。
         let meters: [(value: Double?, shown: Bool, slot: Int, color: NSColor)] = [
             (cpu, showCPU, 0, .systemTeal),
             (gpu, showGPU, 1, .systemGreen),
         ]
         for meter in meters {
-            guard meter.shown, let value = meter.value else { continue }
+            guard meter.shown else { continue }
             let rect = Self.meterRect(slot: meter.slot)
+            guard let value = meter.value else { drawUnavailable(in: rect); continue }
             meter.color.setFill()
-            let fillWidth = rect.width * min(1, max(0, value))
+            let fillHeight = rect.height * min(1, max(0, value))
+            guard fillHeight > 0 else { continue }
             NSBezierPath(roundedRect: NSRect(x: rect.minX, y: rect.minY,
-                width: fillWidth, height: rect.height),
-                         xRadius: 3, yRadius: 3).fill()
-
-            // 繁忙闪点。**用闪烁而不是移动**表达「正在忙」。
-            //
-            // 上一版是让亮点沿已填充部分来回移动，速度 ∝ 忙碌度。实测两个问题：
-            // 一是 CPU tick 约 1Hz 更新，这个值本来就是 1 秒粒度的读数，
-            // 把「移动快慢」映射到它身上没有信息量；二是 43pt 下亮点只有 4×10pt，
-            // 来回移动几乎察觉不到，只剩一个模糊的抖动。
-            //
-            // 改成方波闪烁后语义变成单一维度：**在闪 = 这条指标对应的资源正在忙**。
-            // 频率由 UI 节奏决定（pulse 每秒一个周期），不承载数据含义——
-            // 闪烁频率不是「忙的程度」，只是「在忙」这一状态本身。
-            //
-            // 忙碌度接近 0 时完全不画，同时动画定时器也不启动，静止期零开销。
-            guard value > Self.busyThreshold else { continue }
-            let dot = NSRect(x: rect.minX + max(0, fillWidth - 5), y: rect.minY - 1,
-                             width: 5, height: rect.height + 2)
-            NSColor.white.withAlphaComponent(Self.blinkAlpha(pulse)).setFill()
-            NSBezierPath(ovalIn: dot).fill()
+                width: rect.width, height: fillHeight), xRadius: 3, yRadius: 3).fill()
         }
 
         // 额度轨（5 小时 + 周）。画法是标准 bullet graph：
@@ -862,12 +897,10 @@ final class DockView: NSView {
         //   竖刻度   = 时间已过百分比 ← 同一量纲上的参照
         //
         // 于是「消耗繁忙度」不用另设一个指标表达，直接看刻度落在填充的哪一侧：
-        // 刻度在填充右边 = 用掉的比时间多 = 烧得比线性快。领先超过 5 个百分点
+        // 刻度在填充左边 = 用掉的比时间多 = 烧得比线性快。领先超过 5 个百分点
         // 整条轨转琥珀色。
         //
-        // 之前只画「时间已过」一段、且只有一条轨，与下方彩色计量条挨得太近，
-        // 43pt 下容易被当成第四条机器指标。现在两条轨同画法、同位置（紧贴大数字），
-        // 与彩色条形成明确的「额度 / 负载」两组。
+        // 额度轨在底部横向填充，与右上竖向负载柱分区。
         for (index, rail) in rails.enumerated() {
             let rect = Self.railRect(index)
             let used = min(1, max(0, rail.used))
@@ -895,11 +928,9 @@ final class DockView: NSView {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let dock = DockView(frame: NSRect(x: 0, y: 0, width: 128, height: 128))
     let sampler = SystemSampler()
+    let network = NetworkMonitor()
     let queue = OperationQueue()
     var timers: [Timer] = []
-    /// 动效定时器。只在 CPU 有实际忙碌度时才存在，静止期不创建，
-    /// 保证空闲时零动画开销（详见 updateAnimation 的说明）。
-    var animationTimer: Timer?
     var observers: [NSObjectProtocol] = []
     var window: NSWindow!
     let details = DetailsView()
@@ -950,8 +981,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             self.log("willSleep 触发：停表 \(self.timers.count) 个、取消在途查询 \(self.queue.operationCount) 个")
+            self.network.stop()
             self.sleeping = true; self.timers.forEach { $0.invalidate() }; self.queue.cancelAllOperations()
-            self.stopAnimation()
         })
         observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
@@ -1028,9 +1059,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func tick() {
         guard !sleeping else { return }
+        network.poll { [weak self] in self?.render() }
         let data = sampler.sample()
         dock.cpu = data.cpu; dock.gpu = data.gpu?.deviceUtilization
-        dock.activity = max(data.cpu ?? 0, data.gpu?.deviceUtilization ?? 0)
         system = data
         logSample(data)
         // 额度轨：每条窗口一条，按 5 小时 → 周的顺序。用量与时间进度都来自
@@ -1045,39 +1076,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }) ?? nil)
         }
         render()
-        updateAnimation()
-    }
-
-    /// 按 CPU 忙碌度启停动效定时器。
-    ///
-    /// 静止期完全不重绘是硬要求：CPU 忙碌度接近 0、或 CPU 显示被关掉时，
-    /// 定时器直接不存在（不是「存在但空转」），此时应用的周期性开销只有
-    /// 系统指标采样与额度轮询本身。
-    func updateAnimation() {
-        // 0.02 以下视为静止：此时闪点不存在，却要付出每 100ms 一次 dockTile
-        // 上传与 WindowServer 合成，不划算。CPU 与 GPU 任一超过阈值就启动：
-        // 两条计量条各有一个闪点，任一在闪都算「在忙」。
-        let animated = (config.showCPU && (dock.cpu ?? 0) > DockView.busyThreshold)
-            || (config.showGPU && (dock.gpu ?? 0) > DockView.busyThreshold)
-        if animated {
-            if animationTimer == nil {
-                let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
-                    self?.animationStep()
-                }
-                timer.tolerance = 0.02
-                RunLoop.main.add(timer, forMode: .common)
-                animationTimer = timer
-                // 动效是否真的在运行，直接关系到性能测量的结论是否成立
-                // （不运行就测不到 dockTile 上传与 WindowServer 合成的开销）。
-                // 打印出来让性能脚本事后能核对，不靠假设。
-                log(String(format: "anim start cpu=%.3f gpu=%.3f", dock.cpu ?? 0, dock.gpu ?? 0))
-            }
-        } else {
-            if animationTimer != nil { log("anim stop") }
-            animationTimer?.invalidate()
-            animationTimer = nil
-            dock.pulse = 0
-        }
     }
 
     private static let processStart = Date()
@@ -1154,25 +1152,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         handle.write(line.data(using: .utf8)!)
     }
 
-    /// 推进闪烁相位并重绘 Dock 图标。
-    ///
-    /// 闪烁只表达「在忙」这一状态，不承载程度信息，所以相位**匀速推进**——
-    /// 上一版「忙碌度越高移动越快」的变速逻辑随移动亮点一起淘汰了。
-    /// 每步 0.1，即 1 秒一个完整闪烁周期。
-    ///
-    /// 这里的 `dockTile.display()` 绕过了 render() 的 lastDockState 去重判断——
-    /// 那是刻意的：去重是为了避免 5 秒采样时重复重绘，而动效每 100ms 一次、
-    /// 相位每次都变，本来就不该走去重路径。
-    func animationStep() {
-        dock.pulse += 0.1
-        if dock.pulse > 1 { dock.pulse -= floor(dock.pulse) }
-        NSApp.dockTile.display()
-    }
-
-    func stopAnimation() {
-        animationTimer?.invalidate()
-        animationTimer = nil
-    }
     @objc func openSettings() {
         // 懒加载：设置面板有 12 个控件，用户不开设置时建它纯属浪费内存。
         // 窗口本身常驻内存没意义——不进这个分支就一个控件都不创建。
@@ -1209,6 +1188,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func render() {
         dock.remaining = quota?.windows.first?.remaining
+        dock.country = network.exit?.country
+        dock.proxyEnabled = network.proxyEnabled
+        dock.resetLabel = NetworkStatus.resetLabel(quota?.windows.first?.resetsAt)
         // stale 的含义是「有快照但已过期」，所以必须先有数据。
         // 之前只要有 errorText 就是 stale，首次查询失败（根本没有快照）也会
         // 被标成过期，详情窗口与 Dock 菜单都靠各自再判一次 quotaAvailable
@@ -1219,12 +1201,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dock.showCPU = config.showCPU
         dock.showGPU = config.showGPU
         // 开关必须计入状态串：否则用户关掉 CPU 后图标内容变了却不会重绘
-        let pace = dock.rails.first.flatMap { $0.elapsed }.map { String(format: "%.3f", $0) } ?? "-"
-        let activity = dock.activity.map { String(format: "%.3f", $0) } ?? "-"
         let railsSignature = dock.rails.map { String(format: "%.3f/%.3f", $0.used, $0.elapsed ?? -1) }
             .joined(separator: ",")
         let dockState = "\(dock.remaining ?? -1):\(dock.stale):\(config.showCPU):\(config.showGPU):"
-            + "\(Int((dock.cpu ?? -1) * 100)):\(Int((dock.gpu ?? -1) * 100)):\(railsSignature):\(activity)"
+            + "\(Int((dock.cpu ?? -1) * 100)):\(Int((dock.gpu ?? -1) * 100)):\(railsSignature):\(dock.country ?? "?"):\(String(describing: dock.proxyEnabled)):\(dock.resetLabel ?? "-")"
         if dockState != lastDockState { NSApp.dockTile.display(); lastDockState = dockState }
         details.update(
             windows: (quota?.windows ?? []).map { value in
@@ -1259,12 +1239,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         // 菜单仍显示内存（用户偶尔要查），但 DockView 不再持有它——
         // 数据直接从系统采样拿，不经过图标视图转一手。
-        Self.buildDockMenu(target: self, quota: quota, stale: dock.stale,
+        let menu = Self.buildDockMenu(target: self, quota: quota, stale: dock.stale,
                            loading: loading, errorText: errorText,
                            cpu: dock.cpu, gpu: dock.gpu,
                            memory: system.memoryFraction,
                            showCPU: config.showCPU, showGPU: config.showGPU,
                            showMemory: config.showMemory)
+        let proxy = network.proxyEnabled.map { $0 ? "开启" : "关闭" } ?? "未知"
+        let name = network.exit.flatMap { Locale(identifier: "zh_CN").localizedString(forRegionCode: $0.country) }
+        let country = name ?? "未知"
+        let lines = ["探测出口（Cloudflare）：\(country)",
+                     "出口 IP：\(network.exit?.ip ?? "未知")",
+                     "系统代理：\(proxy)（不代表全部流量）"]
+        for (index, line) in lines.enumerated() {
+            let item = NSMenuItem(title: line, action: nil, keyEquivalent: "")
+            item.isEnabled = false; menu.insertItem(item, at: index)
+        }
+        return menu
     }
 
     /// 构造 Dock 菜单。抽成不依赖 `NSApplication` 实例的静态函数，
@@ -1357,7 +1348,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationWillTerminate(_ notification: Notification) {
-        timers.forEach { $0.invalidate() }; stopAnimation()
+        timers.forEach { $0.invalidate() }
+        network.stop()
         queue.cancelAllOperations(); queue.waitUntilAllOperationsAreFinished()
         observers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
     }

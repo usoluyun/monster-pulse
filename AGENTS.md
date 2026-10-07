@@ -11,6 +11,7 @@ Swift + AppKit，零第三方依赖。`app/` 是全部源码，`app/Sources/` �
 | 文件 | 职责 |
 |---|---|
 | `Metrics.swift` | 领域层：额度解析、Codex 子进程查询、系统采样（CPU/内存/磁盘/GPU）、格式化。**不 import AppKit** |
+| `Network.swift` | 系统代理读取、Cloudflare 出口探测、网络数据解析与短倒计时。**不 import AppKit** |
 | `Alerts.swift` | 预警规则与跃迁去重。纯逻辑，不碰 AppKit |
 | `Config.swift` | 配置读写 + 设置窗口 |
 | `DetailsView.swift` | 详情窗口视图 |
@@ -39,6 +40,7 @@ bash app/tests/run-perf-test.sh        # 性能验收（3 轮，约 75 分钟）
 |---|---|
 | `--self-test` | 全部纯逻辑断言，不联网。系统采样会等计数器变化，最长约 1 秒 |
 | `--probe` | 读真实额度，单次。非零退出即失败，不用模拟值代替 |
+| `--network-probe` | 读真实系统代理并探测出口国家，单次；失败返回非零。终端结果不代替 GUI 启动验证 |
 | `--render-test` | Dock 图标离屏渲染，规格见 `tests/render-regress.sh` 的 `CASES` |
 | `--details-render-test` | 详情窗口离屏渲染：`normal` / `no-data` / `stale` / `error` / `loading` / `*-no-meters` / `no-gpu` |
 | `--settings-render-test` | 设置面板离屏渲染，并输出 `layout:` 诊断（`render-regress.sh` 据此判 FAIL）。状态：`proxy` / `dns` / `nometers` / `alerts-off` / `login-on` / `login-off` / `full` |

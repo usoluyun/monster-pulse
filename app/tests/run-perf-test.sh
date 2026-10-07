@@ -113,10 +113,8 @@ for round in $(seq 1 "$ROUNDS"); do
   echo "[$round/$ROUNDS] Activity Monitor · 窗口打开 · ${CYCLE_MINUTES} 分钟"
   run_activity_monitor "am-r$round-baseline"
 
-  # 核对动效是否在测量期间运行过。CPU 对比的有效性依赖于此——
-  # 忙碌度 ≤0.02 时定时器不创建，动效开销为零，测到的就不是真实成本。
-  starts="$(grep -c 'anim start' "$OUT/dock-r$round-baseline.app.log" 2>/dev/null || echo 0)"
-  echo "  → 动效核对：dock-r$round-baseline 日志中 anim start 出现 ${starts} 次"
+  # 分栏版不再创建闪点动画定时器；历史动画版的性能结果不能代替本版实测。
+  echo "  → 本轮为静态分栏布局（仅采样/额度变化时重绘）"
 done
 
 echo "采样完成，汇总："
