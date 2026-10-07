@@ -450,38 +450,49 @@ if CommandLine.arguments.contains("--settings-render-test") {
     let config: Config
     switch state {
     case "nometers":   config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
-                                      showCPU: false, showMemory: false, alertsEnabled: base.alertsEnabled,
+                                      showCPU: false, showMemory: false, showGPU: base.showGPU, alertsEnabled: base.alertsEnabled,
                                       alertQuotaThreshold: base.alertQuotaThreshold,
                                       alertResetLeadMinutes: base.alertResetLeadMinutes,
                                       alertFailureStreak: base.alertFailureStreak,
                                       diskAlertMBs: base.diskAlertMBs, proxyURL: base.proxyURL)
     case "alerts-off": config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
-                                      showCPU: base.showCPU, showMemory: base.showMemory, alertsEnabled: false,
+                                      showCPU: base.showCPU, showMemory: base.showMemory, showGPU: base.showGPU, alertsEnabled: false,
                                       alertQuotaThreshold: base.alertQuotaThreshold,
                                       alertResetLeadMinutes: base.alertResetLeadMinutes,
                                       alertFailureStreak: base.alertFailureStreak,
                                       diskAlertMBs: base.diskAlertMBs, proxyURL: base.proxyURL)
     case "dns":        config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
                                       showCPU: base.showCPU, showMemory: base.showMemory,
-                                      alertsEnabled: base.alertsEnabled,
+                                      showGPU: base.showGPU, alertsEnabled: base.alertsEnabled,
                                       alertQuotaThreshold: base.alertQuotaThreshold,
                                       alertResetLeadMinutes: base.alertResetLeadMinutes,
                                       alertFailureStreak: base.alertFailureStreak,
                                       diskAlertMBs: base.diskAlertMBs, proxyURL: "")
     default:           config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
                                       showCPU: base.showCPU, showMemory: base.showMemory,
-                                      alertsEnabled: base.alertsEnabled,
+                                      showGPU: base.showGPU, alertsEnabled: base.alertsEnabled,
                                       alertQuotaThreshold: base.alertQuotaThreshold,
                                       alertResetLeadMinutes: base.alertResetLeadMinutes,
                                       alertFailureStreak: base.alertFailureStreak,
                                       diskAlertMBs: base.diskAlertMBs, proxyURL: "127.0.0.1:12334")
     }
     let controller = SettingsWindowController(config: config) { _ in }
+    controller.renderAppearance = renderAppearance
     controller.renderToPNG(out)
     print("wrote \(out) state=\(state)")
     print("layout: \(controller.layoutDiagnostics())")
     exit(0)
 }
+// 离屏渲染统一钉死深色外观。
+//
+// 为什么必须钉：视图不在窗口里时，`labelColor` 这类动态颜色解析不出来，文字
+// 会被画成白色；而窗口背景仍跟随系统外观变成白色，于是白字白底——文字整个消失。
+// 实测同一命令在系统浅色外观下渲染出的 PNG 一个字都没有。
+//
+// 顺带暴露了视觉回归的一个盲区：此前每次都先 --update 重生成基准图，外观变化
+// 被基准图重建掩盖，因此这个依赖一直没被发现。钉死外观后基准图才真正可比。
+let renderAppearance = NSAppearance(named: .darkAqua)!
+
 if CommandLine.arguments.contains("--dock-menu-dump") {
     // 把 Dock 菜单结构打成纯文本，供人工排障与自检断言。
     // 格式：每行 "<enabled|disabled>\t<title>"，分隔项显示为 disabled\t--
@@ -557,35 +568,46 @@ if CommandLine.arguments.contains("--details-render-test") {
     let showCPU = !state.hasSuffix("-no-meters")
     let showMemory = showCPU
     // 固定的系统读数，磁盘速率刻意给一个高位（阈值 200MB/s 的 2.25 倍），
-    // 让「速率条 + 明细行」在基准图里真的有内容可看。
+    // 让「速率条 + 明细行」在基准图里真的有内容可看。GPU 设为满载，
+    // 还原跑本地模型时的真实形态（CPU 闲、GPU 忙）。
     let demoReading = SystemReading(cpu: 0.42, memoryFraction: 0.61,
                                     compressedBytes: 2.1 * 1_073_741_824,
                                     diskReadBytesPerSecond: 450 * 1_048_576,
                                     diskWriteBytesPerSecond: 0,
                                     swapUsedBytes: 1.6 * 1_073_741_824,
-                                    physicalBytes: 24 * 1_073_741_824)
+                                    physicalBytes: 24 * 1_073_741_824,
+                                    gpu: GPUReading(deviceUtilization: 1.0,
+                                                   rendererUtilization: 1.0,
+                                                   tilerUtilization: 0.22,
+                                                   inUseMemoryBytes: 7.5 * 1_073_741_824,
+                                                   model: "Apple M4 Pro"))
+    // 「GPU 不可用」状态：没有 IOAccelerator 服务时界面必须显示「—」而不是猜
+    let showGPU = showCPU && state != "no-gpu"
+    let readingForState: SystemReading = state == "no-gpu"
+        ? SystemReading(cpu: 0.42, memoryFraction: 0.61, physicalBytes: 24 * 1_073_741_824)
+        : demoReading
     let idleReading = SystemReading()
     switch state {
     case "no-data", "no-data-no-meters":
         details.update(windows: [], quotaAvailable: false, cpu: nil, reading: idleReading,
-                       showCPU: showCPU, showMemory: showMemory,
+                       showCPU: showCPU, showMemory: showMemory, showGPU: showGPU,
                        updated: nil, loading: false, errorText: nil, stale: false)
     case "stale":
-        details.update(windows: windows, quotaAvailable: true, cpu: 0.42, reading: demoReading,
-                       showCPU: showCPU, showMemory: showMemory,
+        details.update(windows: windows, quotaAvailable: true, cpu: 0.42, reading: readingForState,
+                       showCPU: showCPU, showMemory: showMemory, showGPU: showGPU,
                        updated: now.addingTimeInterval(-600), loading: false, errorText: nil, stale: true)
     case "error":
-        details.update(windows: [], quotaAvailable: false, cpu: 0.42, reading: demoReading,
-                       showCPU: showCPU, showMemory: showMemory,
+        details.update(windows: [], quotaAvailable: false, cpu: 0.42, reading: readingForState,
+                       showCPU: showCPU, showMemory: showMemory, showGPU: showGPU,
                        updated: nil, loading: false,
                        errorText: "Codex 查询超时或进程退出；请检查 CLI 登录状态和网络", stale: true)
     case "loading":
-        details.update(windows: windows, quotaAvailable: true, cpu: 0.42, reading: demoReading,
-                       showCPU: showCPU, showMemory: showMemory,
+        details.update(windows: windows, quotaAvailable: true, cpu: 0.42, reading: readingForState,
+                       showCPU: showCPU, showMemory: showMemory, showGPU: showGPU,
                        updated: now, loading: true, errorText: nil, stale: false)
     default:
-        details.update(windows: windows, quotaAvailable: true, cpu: 0.42, reading: demoReading,
-                       showCPU: showCPU, showMemory: showMemory,
+        details.update(windows: windows, quotaAvailable: true, cpu: 0.42, reading: readingForState,
+                       showCPU: showCPU, showMemory: showMemory, showGPU: showGPU,
                        updated: now, loading: false, errorText: nil, stale: false)
     }
 
@@ -593,6 +615,8 @@ if CommandLine.arguments.contains("--details-render-test") {
     let total = NSSize(width: width, height: content + inset * 2 + bottomBar)
     // 容器模拟真实窗口的 contentView，这样 details 的 frame 与线上一致
     let container = NSView(frame: NSRect(origin: .zero, size: total))
+    container.appearance = renderAppearance
+    details.appearance = renderAppearance
     container.addSubview(details)
     details.frame = NSRect(x: inset, y: bottomBar, width: width - inset * 2, height: content)
     container.layoutSubtreeIfNeeded()
@@ -778,6 +802,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 注册域是易失的，每次启动都要重注册，再叠加用户已存的持久值
         Config.registerDefaults()
         config = Config.load()
+        // 诊断通道：仅在 MP_SAMPLE_LOG 指定时逐次采样落盘
+        openSampleLog()
         NSApp.setActivationPolicy(.regular)
         let menu = NSMenu(), appItem = NSMenuItem(), submenu = NSMenu()
         submenu.addItem(withTitle: "设置…", action: #selector(openSettings), keyEquivalent: ",")
@@ -860,6 +886,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dock.cpu = data.cpu; dock.memory = data.memoryFraction
         dock.activity = config.showCPU ? data.cpu : nil
         system = data
+        logSample(data)
         // 时间进度参考线只跟主窗口（Dock 显示的那个）。参考线随时间缓慢右移：
         // 300 分钟窗口下每 5 秒约 0.28%，在 90pt 宽的条上是 0.25pt，肉眼不可见，
         // 所以不需要额外的动画定时器来推进它。
@@ -905,6 +932,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func log(_ message: String) {
         FileHandle.standardError.write("MP \(message)\n".data(using: .utf8)!)
+    }
+
+    /// 逐次采样落盘，供事后分析趋势。
+    ///
+    /// 只在 MP_SAMPLE_LOG 指定文件时启用（默认关闭）：这是排查用的诊断通道，
+    /// 正常运行不该持续写盘——每 5 秒一次写入是真实开销，且日志无上限。
+    /// 写文件用 append 且不加锁：采样全部发生在主线程，不存在并发写同一句柄。
+    private var sampleLogHandle: FileHandle?
+
+    func openSampleLog() {
+        guard let path = ProcessInfo.processInfo.environment["MP_SAMPLE_LOG"] else { return }
+        FileManager.default.createFile(atPath: path, contents: nil)
+        guard let handle = FileHandle(forWritingAtPath: path) else {
+            log("sample log 打开失败：\(path)"); return
+        }
+        handle.seekToEndOfFile()
+        handle.write(Self.sampleLogHeader.data(using: .utf8)!)
+        sampleLogHandle = handle
+        log("sample log → \(path)")
+    }
+
+    private static let sampleLogHeader = "t,cpu,memfrac,compressed,read_bps,write_bps,swap\n"
+
+    private func logSample(_ r: SystemReading) {
+        guard let handle = sampleLogHandle else { return }
+        func f(_ v: Double?) -> String { v.map { String(format: "%.3f", $0) } ?? "-" }
+        let line = [
+            String(format: "%.2f", ProcessInfo.processInfo.systemUptime),
+            f(r.cpu), f(r.memoryFraction), f(r.compressedBytes),
+            f(r.diskReadBytesPerSecond), f(r.diskWriteBytesPerSecond), f(r.swapUsedBytes),
+        ].joined(separator: ",") + "\n"
+        handle.write(line.data(using: .utf8)!)
     }
 
     /// 推进亮点相位并重绘 Dock 图标。
@@ -986,7 +1045,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             quotaAvailable: quota != nil,
             cpu: config.showCPU ? dock.cpu : nil,
             reading: system,
-            showCPU: config.showCPU, showMemory: config.showMemory,
+            showCPU: config.showCPU, showMemory: config.showMemory, showGPU: config.showGPU,
             updated: updated, loading: loading, errorText: errorText, stale: dock.stale)
         fitWindow()
     }

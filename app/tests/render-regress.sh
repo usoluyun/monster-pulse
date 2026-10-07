@@ -58,6 +58,7 @@ DETAILS_CASES=(
   "details-loading"
   "details-normal-no-meters"
   "details-no-data-no-meters"
+  "details-no-gpu"
 )
 
 # 设置面板的用例。此前设置窗口没有渲染入口，新增控件是否被挤出可视区、

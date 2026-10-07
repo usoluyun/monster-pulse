@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import IOKit
 
 struct QuotaWindow {
     let used: Double
@@ -160,6 +161,86 @@ enum QuotaFormat {
     }
 }
 
+/// GPU 的一次采样。
+struct GPUReading {
+    /// 设备整体占用 0...1
+    var deviceUtilization: Double?
+    /// 渲染器占用 0...1
+    var rendererUtilization: Double?
+    /// 分块器占用 0...1
+    var tilerUtilization: Double?
+    /// 驱动报告的显存占用（字节）
+    var inUseMemoryBytes: Double?
+    /// 设备型号，如 "Apple M4 Pro"
+    var model: String?
+}
+
+/// GPU 采样。
+///
+/// **为什么需要它**：跑本地大模型时，CPU 约 7~13%、内存占比恒定、磁盘读归零
+/// （权重已进页缓存），但机器明显发烫——负载在 GPU 上。实测推理时
+/// Device Utilization 99~100%、稳定空闲时 0%，是唯一能区分「在推理」和「闲着」
+/// 的指标。
+///
+/// **走的是 IOKit 而非 Metal API**：Metal 没有暴露利用率的公开接口，
+/// `PerformanceStatistics` 是 `IOAccelerator` 服务的注册表属性，也就是活动监视器
+/// 显示 GPU 占用时的数据来源。
+///
+/// **已知限制**：属性键名是 Apple 内部约定，**没有兼容性保证**，系统更新可能改名
+/// 或消失。读取失败一律返回 nil，界面显示「—」，不猜测、不伪造。
+///
+/// 另一个实测数字：service 在初始化时缓存一次，之后每次读属性约 53 微秒。
+/// 若每秒调一次 `IOServiceGetMatchingServices` 去遍历注册表，开销不可接受，
+/// 所以这里必须缓存。
+final class GPUSampler {
+    private var entries: [io_service_t] = []
+
+    init() {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault,
+                                          IOServiceMatching("IOAccelerator"),
+                                          &iterator) == KERN_SUCCESS else { return }
+        while case let entry = IOIteratorNext(iterator), entry != 0 {
+            entries.append(entry)
+        }
+        IOObjectRelease(iterator)
+    }
+
+    deinit {
+        for entry in entries { IOObjectRelease(entry) }
+    }
+
+    var isAvailable: Bool { !entries.isEmpty }
+
+    /// 多块 GPU 时取占用最高的那块——用户关心的是「哪块最忙」，
+    /// 而不是平均值（平均值会把双显卡的负载稀释掉）。
+    func sample() -> GPUReading? {
+        var best: GPUReading?
+        for entry in entries {
+            guard let raw = IORegistryEntryCreateCFProperty(entry, "PerformanceStatistics" as CFString,
+                                                             kCFAllocatorDefault, 0)?.takeRetainedValue(),
+                  let stats = raw as? [String: Any] else { continue }
+            func percent(_ key: String) -> Double? {
+                guard let v = stats[key] as? Int else { return nil }
+                return min(1, max(0, Double(v) / 100))
+            }
+            let reading = GPUReading(
+                deviceUtilization: percent("Device Utilization %"),
+                rendererUtilization: percent("Renderer Utilization %"),
+                tilerUtilization: percent("Tiler Utilization %"),
+                inUseMemoryBytes: stats["In use system memory"] as? Double
+                    ?? (stats["In use system memory"] as? Int).map(Double.init),
+                model: IORegistryEntryCreateCFProperty(entry, "model" as CFString,
+                                                       kCFAllocatorDefault, 0)?.takeRetainedValue() as? String)
+            if let current = best, let a = current.deviceUtilization, let b = reading.deviceUtilization, a >= b {
+                continue   // 已有更忙的
+            }
+            best = reading
+        }
+        return best
+    }
+}
+
 /// 一次系统采样。字段缺失表示读不到（如首次采样没有差值基准）。
 struct SystemReading {
     /// CPU 忙碌率 0...1。注意时效性：底层 tick 计数器约每秒才刷新，
@@ -178,10 +259,15 @@ struct SystemReading {
     var swapUsedBytes: Double?
     /// 物理内存总量
     var physicalBytes: Double = 0
+    /// GPU 状态。无 IOAccelerator 服务或读取失败时为 nil
+    var gpu: GPUReading?
 }
 
 final class SystemSampler {
     private let host = mach_host_self()
+    /// GPU 采样器。构造时就缓存 IOAccelerator 服务（实测每次读属性约 53 微秒，
+    /// 但每次重新匹配服务要遍历注册表，开销不可接受）。
+    private let gpu = GPUSampler()
     private var previous: [UInt32]?
     /// pageins/pageouts 是累计计数器，速率靠相邻差值，所以要留住上一次的值。
     /// 与 CPU tick 不同：这两个是亚秒级更新的（实测 0.2s 窗口内就有增量），
@@ -247,6 +333,7 @@ final class SystemSampler {
 
         reading.swapUsedBytes = Self.swapUsedBytes()
         reading.physicalBytes = Double(ProcessInfo.processInfo.physicalMemory)
+        reading.gpu = gpu.sample()
         return reading
     }
 

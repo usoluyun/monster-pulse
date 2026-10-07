@@ -36,6 +36,7 @@ struct Config {
         static let quotaInterval = "quotaRefreshInterval"
         static let showCPU = "showCPU"
         static let showMemory = "showMemory"
+        static let showGPU = "showGPU"
         static let alertsEnabled = "alertsEnabled"
         static let alertThreshold = "alertQuotaThreshold"
         static let alertLead = "alertResetLeadMinutes"
@@ -48,6 +49,8 @@ struct Config {
     var quotaInterval: Double
     var showCPU: Bool
     var showMemory: Bool
+    /// GPU 占用是否显示。跑本地大模型时这是唯一有区分度的指标。
+    var showGPU: Bool
     var alertsEnabled: Bool
     /// 主额度窗口剩余低于此百分比即预警
     var alertQuotaThreshold: Double
@@ -69,7 +72,7 @@ struct Config {
 
     static let `default` = Config(systemInterval: defaultSystemInterval,
                                   quotaInterval: defaultQuotaInterval,
-                                  showCPU: true, showMemory: true,
+                                  showCPU: true, showMemory: true, showGPU: true,
                                   alertsEnabled: true,
                                   alertQuotaThreshold: defaultAlertThreshold,
                                   alertResetLeadMinutes: defaultAlertLead,
@@ -84,6 +87,7 @@ struct Config {
             Key.quotaInterval: defaultQuotaInterval,
             Key.showCPU: true,
             Key.showMemory: true,
+            Key.showGPU: true,
             Key.alertsEnabled: true,
             Key.alertThreshold: defaultAlertThreshold,
             Key.alertLead: defaultAlertLead,
@@ -108,6 +112,7 @@ struct Config {
                                  quotaIntervalRange, defaultQuotaInterval),
             showCPU: d.bool(forKey: Key.showCPU),
             showMemory: d.bool(forKey: Key.showMemory),
+            showGPU: d.bool(forKey: Key.showGPU),
             alertsEnabled: d.bool(forKey: Key.alertsEnabled),
             alertQuotaThreshold: clamp(d.double(forKey: Key.alertThreshold),
                                        alertThresholdRange, defaultAlertThreshold),
@@ -136,6 +141,10 @@ struct Config {
     mutating func setShowMemory(_ value: Bool) {
         showMemory = value
         UserDefaults.standard.set(value, forKey: Key.showMemory)
+    }
+    mutating func setShowGPU(_ value: Bool) {
+        showGPU = value
+        UserDefaults.standard.set(value, forKey: Key.showGPU)
     }
     mutating func setAlertsEnabled(_ value: Bool) {
         alertsEnabled = value
@@ -170,7 +179,7 @@ struct Config {
     mutating func resetToDefaults() {
         self = .default
         for key in [Key.systemInterval, Key.quotaInterval, Key.showCPU, Key.showMemory,
-                    Key.alertsEnabled, Key.alertThreshold, Key.alertLead, Key.alertStreak,
+                    Key.showGPU, Key.alertsEnabled, Key.alertThreshold, Key.alertLead, Key.alertStreak,
                     Key.diskAlertThreshold, Key.proxyURL] {
             UserDefaults.standard.removeObject(forKey: key)
         }
@@ -224,6 +233,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
                                         target: nil, action: nil)
     private let memoryCheckbox = NSButton(checkboxWithTitle: "在图标与详情中显示内存",
                                           target: nil, action: nil)
+    private let gpuCheckbox = NSButton(checkboxWithTitle: "在详情中显示 GPU 占用",
+                                       target: nil, action: nil)
     // 预警
     private let alertsCheckbox = NSButton(checkboxWithTitle: "启用额度预警（Dock 图标跳动）",
                                           target: nil, action: nil)
@@ -282,7 +293,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         appendSlider(quotaLabel, quotaSlider, height: 17, gapBefore: 8)
 
         append(heading("显示"), height: 15, gapBefore: 20)
-        for box in [cpuCheckbox, memoryCheckbox] {
+        for box in [cpuCheckbox, memoryCheckbox, gpuCheckbox] {
             box.target = self
             box.action = #selector(checkboxChanged(_:))
             append(box, height: 20, gapBefore: box === cpuCheckbox ? 10 : 4)
@@ -433,6 +444,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         quotaSlider.doubleValue = config.quotaInterval
         cpuCheckbox.state = config.showCPU ? .on : .off
         memoryCheckbox.state = config.showMemory ? .on : .off
+        gpuCheckbox.state = config.showGPU ? .on : .off
         alertsCheckbox.state = config.alertsEnabled ? .on : .off
         thresholdSlider.doubleValue = config.alertQuotaThreshold
         leadSlider.doubleValue = config.alertResetLeadMinutes
@@ -487,6 +499,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             config.setShowCPU(sender.state == .on)
         } else if sender === memoryCheckbox {
             config.setShowMemory(sender.state == .on)
+        } else if sender === gpuCheckbox {
+            config.setShowGPU(sender.state == .on)
         } else {
             config.setAlertsEnabled(sender.state == .on)
         }
@@ -503,7 +517,14 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     /// 离屏渲染整个窗口内容为 PNG，用于视觉检查面板布局。
     /// 设置窗口以前没有渲染入口，新增控件是否被挤出可视区只能靠肉眼，
     /// 容易漏——详情窗口当初就是靠这个手段发现了「参考线画在 CPU 条上」的错误。
+    /// 渲染时使用的外观。由 --settings-render-test 注入，见 main.swift 里的说明。
+    var renderAppearance: NSAppearance?
+
     func renderToPNG(_ path: String) {
+        if let appearance = renderAppearance {
+            content.appearance = appearance
+            window.appearance = appearance
+        }
         resizeWindow()
         guard let content = window.contentView else { return }
         content.layoutSubtreeIfNeeded()

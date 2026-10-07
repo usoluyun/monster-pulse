@@ -190,6 +190,7 @@ final class DetailsView: NSView {
     private let cpuRow = MeterRowView(name: "CPU", color: .systemTeal)
     private let memoryRow = MeterRowView(name: "内存", color: .systemPurple)
     private let diskRow = DiskRateRowView()
+    private let gpuRow = MeterRowView(name: "GPU", color: .systemGreen)
     /// 内存 / 压缩 / Swap 的文字明细，比一根条承载更多数字
     private let memoryDetail = NSTextField(labelWithString: "")
     private var quotaRows: [QuotaRowView] = []
@@ -208,7 +209,7 @@ final class DetailsView: NSView {
             box.boxType = .separator
             addSubview(box)
         }
-        for view in [header, empty, cpuRow, memoryRow, diskRow, memoryDetail, footer, status] {
+        for view in [header, empty, cpuRow, gpuRow, memoryRow, diskRow, memoryDetail, footer, status] {
             addSubview(view)
         }
     }
@@ -217,7 +218,7 @@ final class DetailsView: NSView {
     /// 结构化数据入口。AppDelegate 只负责取数与判断 stale，视图不含任何业务规则。
     func update(windows: [(title: String, used: Int, remaining: Int, reset: String?)],
                 quotaAvailable: Bool, cpu: Double?, reading: SystemReading,
-                showCPU: Bool, showMemory: Bool,
+                showCPU: Bool, showMemory: Bool, showGPU: Bool,
                 updated: Date?, loading: Bool, errorText: String?, stale: Bool) {
         if quotaRows.count != windows.count {
             quotaRows.forEach { $0.removeFromSuperview() }
@@ -236,6 +237,9 @@ final class DetailsView: NSView {
         // 被配置关掉的指标整行隐藏，而不是显示成「—」——关掉就是不想看
         cpuRow.isHidden = !showCPU
         cpuRow.update(showCPU ? cpu : nil)
+        // GPU 紧随 CPU：两者都是「活动度」，放一起才读得出「CPU 闲着但 GPU 满载」
+        gpuRow.isHidden = !showGPU
+        gpuRow.update(showGPU ? reading.gpu?.deviceUtilization : nil)
 
         // 内存区从「一个占比数字」换成三行实测指标，因为占比看不出磁盘 I/O：
         // 跑本地大模型时最刺眼的是读权重的速率，而内存占比对此一无所知。
@@ -253,6 +257,11 @@ final class DetailsView: NSView {
             }
             if let swap = reading.swapUsedBytes, swap > 0 {
                 parts.append("Swap \(SystemFormat.bytes(swap))")
+            }
+            // GPU 驱动报告的显存占用：推理时能到 7GB+，是判断「模型是否已加载」
+            // 的直接信号（空闲时约 1.2GB）
+            if let gpuMem = reading.gpu?.inUseMemoryBytes, gpuMem > 0 {
+                parts.append("GPU 显存 \(SystemFormat.bytes(gpuMem))")
             }
             memoryDetail.stringValue = parts.joined(separator: " · ")
         }
@@ -286,7 +295,7 @@ final class DetailsView: NSView {
             total += Gap.beforeDivider + 1 + Gap.afterDivider
         }
         // 被隐藏的计量行不占高度，也不出现在其前后的间隔里
-        let meters = [cpuRow, memoryRow, diskRow].filter { !$0.isHidden }
+        let meters = [cpuRow, gpuRow, memoryRow, diskRow].filter { !$0.isHidden }
         for (index, row) in meters.enumerated() {
             if index > 0 { total += Gap.betweenMeters }
             total += MeterRowView.height
@@ -327,7 +336,7 @@ final class DetailsView: NSView {
             }
             place(dividerOne, 1, gap: Gap.afterDivider)
         }
-        let meters = [cpuRow, memoryRow, diskRow].filter { !$0.isHidden }
+        let meters = [cpuRow, gpuRow, memoryRow, diskRow].filter { !$0.isHidden }
         for (index, row) in meters.enumerated() {
             let gap = index < meters.count - 1 ? Gap.betweenMeters : Gap.afterDivider
             place(row, MeterRowView.height, gap: gap)
