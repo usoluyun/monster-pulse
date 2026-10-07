@@ -422,41 +422,24 @@ if CommandLine.arguments.contains("--draw-bench") {
 }
 if CommandLine.arguments.contains("--render-test") {
     // 把 Dock 图标离屏渲染成 PNG，用于回归对比：改 draw() 后要确认视觉未变。
-    // 用法: MonsterPulse --render-test <out.png> [beats] [rails] [meters] [phase]
-    //   beats:  3 个 0~100 的忙碌等级（CPU,GPU,Quota），-1 = 该点不画
-    //   rails:  "used/elapsed,used/elapsed"，elapsed 传 -1 = 无刻度；传 "none" = 无轨
-    //   meters: both / no-cpu / no-gpu / no-both，控制 CPU/GPU 计量条
-    //   phase:  心跳相位 0~1
+    // 用法: MonsterPulse --render-test <out.png> [beats] [phase]
+    //   beats: 3 个 0~100 的数字逗号分隔 = CPU,GPU,Quota 各自的忙碌等级
+    //          （0 = 闲着只画暗点；-1 = 该点不存在）
+    //   phase: 心跳相位 0~1，同值下不同相位覆盖跳动包络的峰与谷
     let args = Array(CommandLine.arguments.dropFirst(2))
     let out = args.first ?? "/tmp/monsterpulse-render.png"
     let view = DockView(frame: NSRect(x: 0, y: 0, width: 128, height: 128))
     let levels = args.count > 1
         ? args[1].split(separator: ",").map { Double($0) ?? 0 } : [42, 12, 8]
-    view.beats = levels.enumerated().map { _, raw in
-        DockView.Heartbeat(level: raw < 0 ? 0 : min(1, raw / 100), present: raw >= 0)
+    view.beats = levels.enumerated().map { index, raw in
+        DockView.Heartbeat(level: raw < 0 ? 0 : min(1, raw / 100),
+                           present: raw >= 0)
     }
-    if args.count > 2, args[2] != "none" {
-        view.rails = args[2].split(separator: ",").compactMap { piece in
-            let v = piece.split(separator: "/").compactMap(Double.init)
-            guard v.count == 2 else { return nil }
-            return DockView.Rail(used: min(1, max(0, v[0])),
-                                 elapsed: v[1] < 0 ? nil : min(1, max(0, v[1])))
-        }
-    }
-    if args.count > 3 {
-        view.showCPU = args[3] != "no-cpu" && args[3] != "no-both"
-        view.showGPU = args[3] != "no-gpu" && args[3] != "no-both"
-    }
-    // 计量条的值与心跳点共用同一个数：CPU 点的 level 就是 CPU 占用，
-    // GPU 点的 level 就是 GPU 占用（updateBeats 也是这么填的）。
-    // 单独传一份既冗余，又可能出现「点在跳、条却空着」的自相矛盾夹具。
-    if levels.count > 0, levels[0] >= 0 { view.cpu = min(1, levels[0] / 100) }
-    if levels.count > 1, levels[1] >= 0 { view.gpu = min(1, levels[1] / 100) }
-    if args.count > 4 { view.phase = Double(args[4]) ?? 0 }
+    if args.count > 2 { view.phase = Double(args[2]) ?? 0 }
     let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
     view.cacheDisplay(in: view.bounds, to: bitmap)
     try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
-    print("wrote \(out) levels=\(levels) rails=\(view.rails.count) phase=\(view.phase)")
+    print("wrote \(out) levels=\(levels) phase=\(view.phase)")
     exit(0)
 }
 if CommandLine.arguments.contains("--settings-render-test") {
@@ -663,189 +646,107 @@ if CommandLine.arguments.contains("--probe") {
 }
 
 final class DockView: NSView {
-    // ============================================================
-    // 布局（用户 2026-10-07 定稿）：CODEX 标题与额度大数字撤掉，
-    // 心跳点 + 额度轨 + CPU/GPU 计量条全部保留。
-    //
-    //   ●  心跳点 ×3（CPU 青 / GPU 绿 / 额度 琥珀），跳速 ∝ 忙碌度
-    //   ────▎────  额度轨 ×2（5h / 周）：填充=已用%，刻度=时间已过%
-    //   ▓▓▓▓░░░░  CPU 条（青）+ GPU 条（绿），填充=占用
-    //
-    // 心跳回答「谁在忙」，轨与条回答「用到哪了」——两组互补，缺一不可。
-    // ============================================================
-
-    /// 一个心跳点。**跳速映射忙碌度**（0.35–2Hz），不是方波闪烁——
-    /// 用户明确要「他们跳的快慢我就知道哪个忙了」。
+    /// 一个心跳点。
+    ///
+    /// 图标改成纯心跳点阵（用户 2026-10-07 决定）：CODEX 标题、大数字、额度轨、
+    /// 计量条全部撤掉，只剩 3~4 个点。**点的跳速直接映射忙碌度**——这是与
+    /// 上一版「方波闪烁只表达在忙/不在忙」最大的语义差异，用户明确要
+    /// 「他们跳的快慢我就知道哪个忙了」。
+    ///
+    /// 三个资源点（CPU/GPU/Codex 额度）竖排在图标中线上。不跳 = 闲着。
+    /// 额度点的「忙碌度」是消耗速率对时间进度的超前量（burn），不是用量本身
+    /// ——用量是存量，跳速映射增量才有意义。
     struct Heartbeat {
-        /// 0...1，跳速由此决定：0 = 不跳（只画暗点），1 = 最快
+        /// 0...1，跳速由此决定：0 = 不跳，1 = 最快
         var level: Double
         /// 闲着时也画一个暗点占位——空无一物会让用户以为应用挂了
         var present = true
     }
-
-    /// 一条额度轨。两条轨（5 小时窗口 / 周窗口）用同一套画法。
-    struct Rail {
-        /// 已用比例（0...1），画成填充长度——这是「用量」这个量本身。
-        var used: Double
-        /// 窗口时间已过的比例（0...1），画成一道竖刻度。
-        var elapsed: Double?
-    }
-
-    var cpu: Double?
-    /// GPU 占用（0...1）。跑本地大模型时这是判断「机器在不在算」的唯一指标。
-    var gpu: Double?
-    var showCPU = true
-    var showGPU = true
-    /// 额度轨：[0] = 5 小时主窗口，[1] = 周窗口。缺失的窗口不画。
-    var rails: [Rail] = []
-    /// 三个心跳点，从上到下：CPU / GPU / 额度。数组顺序即绘制顺序。
+    /// 三个固定点，从上到下：CPU（青）/ GPU（绿）/ Codex 额度（琥珀）。
+    /// 数组顺序即绘制顺序，位置由 pointRect(slot:) 决定。
     var beats: [Heartbeat] = []
-    /// 心跳相位（共用时钟，animationStep 每 100ms +0.1）。
-    var phase: Double = 0
 
-    // ---------- 心跳几何与波形 ----------
     /// 闲着时占位暗点的透明度
     private static let idleAlpha: CGFloat = 0.28
-    /// 心跳启停线。level 低于此值不跳、动画定时器也不启动。
+    /// 心跳启停线。level 低于此值视为闲着：不跳、动画定时器也不启动。
+    /// 注意与 beatRate 的下限（0.35Hz）区分——那是「在忙但很轻」的档位，
+    /// 不是启停线。
     static let busyThreshold = 0.02
-    /// 点的直径。心跳点排在轨上方的带区里，横向分布。
-    static let dotDiameter: CGFloat = 11
-    /// 三个点水平排布（x 坐标），带区在轨的上方。
-    static func beatRect(_ slot: Int) -> NSRect {
-        let xs: [CGFloat] = [27, 64, 101]
-        let x = xs[min(slot, 2)]
-        let y: CGFloat = 92
-        return NSRect(x: x - Self.dotDiameter / 2, y: y - Self.dotDiameter / 2,
+    /// 点的直径 13pt：43pt Dock 下约 4.4px，峰值放大后约 6.8px——
+    /// 心跳的尺寸变化在小尺寸下必须跨过「一眼可辨」的门槛，9pt 实测太小。
+    static let dotDiameter: CGFloat = 13
+    /// 三个点垂直排布，组中心与图标中心重合：38 / 64 / 90。
+    /// 第一版写成 64+slot*26，组中心落到 90，整组沉在下半区。
+    static let slotPitch: CGFloat = 26
+    static func pointRect(_ slot: Int) -> NSRect {
+        let y = 38 + CGFloat(slot) * Self.slotPitch
+        return NSRect(x: 64 - Self.dotDiameter / 2, y: y,
                       width: Self.dotDiameter, height: Self.dotDiameter)
     }
 
-    /// 心跳包络：两段抛物线拼一个「跳动-回落」的窄峰脉冲。
-    /// 不用正弦——正弦读成呼吸，窄峰才读成心跳。峰宽约 35%。
+    /// 心跳包络：两段抛物线拼一个「跳动-回落」的脉冲。
+    ///
+    /// 刻意不用正弦：正弦的峰是圆的、读起来像呼吸；心跳要的是**窄峰**——
+    /// 快速冲顶、快速回落、然后一段平的低谷。t∈[0,1) 是一个心跳周期，
+    /// 峰宽约 35%。
     static func beatEnvelope(_ t: Double) -> Double {
         let phase = (t.truncatingRemainder(dividingBy: 1) + 1).truncatingRemainder(dividingBy: 1)
         if phase < 0.35 {
+            // 冲顶段：抛物线，峰在 0.175 处
             let u = phase / 0.35
             return 1 - (2 * u - 1) * (2 * u - 1)
         } else {
+            // 低谷段：指数式衰减到底，保持可感知但不刺眼
             let u = (phase - 0.35) / 0.65
             return 0.06 * (1 - u * u * 0.9)
         }
     }
 
-    /// 跳速映射：level 0.02+ → 0.35Hz 起，level 1 → 2Hz。
-    /// 下限抬高是刻意的：每秒零点几次读起来像抖动故障。
+    /// 跳速映射：level 0 → 静止（不启动定时器），level 1 → 每秒 2 次心跳。
+    ///
+    /// 下限刻意抬高（0.35 起）：level 很低时每秒零点几次的「慢跳」看起来像
+    /// 抖动故障而不是心跳，不如让最低档就是清晰可辨的节奏。上限 2Hz 是
+    /// 「忙碌」的可读上限——再快就变成常亮，失去节奏感。
     static func beatRate(for level: Double) -> Double {
         let l = min(1, max(0, level))
         return 0.35 + 1.65 * l
     }
 
-    // ---------- 轨与条的几何（沿用心跳化之前的布局）----------
-    /// 计量条槽位数：CPU / GPU 各一。
-    static let meterSlots = 2
-    static let meterHeight: CGFloat = 7
-    private static let meterPitch: CGFloat = 11
-    static func meterRect(slot: Int) -> NSRect {
-        NSRect(x: 19, y: 25 - CGFloat(slot) * Self.meterPitch,
-               width: 90, height: Self.meterHeight)
-    }
-    /// 额度轨几何：两条轨紧贴心跳点带下方。
-    static let railWidth: CGFloat = 90
-    static let railX: CGFloat = 19
-    static let railHeight: CGFloat = 3
-    static func railRect(_ index: Int) -> NSRect {
-        NSRect(x: railX, y: 42 - CGFloat(index) * 6, width: railWidth, height: railHeight)
-    }
-
-    private func makeBackdrop() -> NSImage {
-        NSImage(size: bounds.size, flipped: false) { rect in
-            NSColor(calibratedWhite: 0.10, alpha: 1).setFill()
-            NSBezierPath(roundedRect: rect.insetBy(dx: 5, dy: 5), xRadius: 24, yRadius: 24).fill()
-            NSColor(calibratedWhite: 0.24, alpha: 1).setFill()
-            // 背板按当前 rails 数画底槽；rails 数变化会让 backdrop 失效重建
-            for index in 0..<self.rails.count {
-                let rail = DockView.railRect(index)
-                NSBezierPath(roundedRect: rail, xRadius: 1.5, yRadius: 1.5).fill()
-            }
-            NSColor.darkGray.setFill()
-            for slot in 0..<DockView.meterSlots {
-                let bar = DockView.meterRect(slot: slot)
-                NSBezierPath(roundedRect: bar, xRadius: 3, yRadius: 3).fill()
-            }
-            return true
-        }
-    }
-
-    private var backdrop: NSImage?
-    private var backdropSize: CGSize = .zero
-    private var backdropRails = 0
+    /// 心跳相位。所有点共用一个推进时钟（animationStep 每 100ms +0.1），
+    /// 各点的周期 = 1 / rate，各自取模。
+    var phase: Double = 0
 
     override func draw(_ dirtyRect: NSRect) {
-        if backdrop == nil || backdropSize != bounds.size || backdropRails != rails.count {
-            backdrop = makeBackdrop()
-            backdropSize = bounds.size
-            backdropRails = rails.count
-        }
-        backdrop?.draw(in: bounds)
+        // 背板：圆角深色底，与 macOS Dock 图标常规观感一致
+        NSColor(calibratedWhite: 0.10, alpha: 1).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 5, dy: 5), xRadius: 24, yRadius: 24).fill()
 
-        // ---------- 1. 心跳点 ----------
-        let dotColors: [NSColor] = [.systemTeal, .systemGreen, .systemOrange]
+        let colors: [NSColor] = [.systemTeal, .systemGreen, .systemOrange]
         for (slot, beat) in beats.enumerated() {
             guard beat.present else { continue }
-            let rect = Self.beatRect(slot)
+            let rect = Self.pointRect(slot)
             let center = NSPoint(x: rect.midX, y: rect.midY)
-            dotColors[slot].withAlphaComponent(Self.idleAlpha).setFill()
+
+            // 基础：闲着时也画的暗点
+            let base = Self.idleAlpha
+            colors[slot].withAlphaComponent(base).setFill()
             NSBezierPath(ovalIn: rect).fill()
+
+            // 心跳：在暗点基础上叠亮，峰值时半径与透明度都放大
             let rate = Self.beatRate(for: beat.level)
-            let env = Self.beatEnvelope(phase * rate)
+            let t = phase * rate
+            let env = Self.beatEnvelope(t)
             if env > 0.01 {
-                let grow = 1 + 0.55 * env
-                let alpha = Self.idleAlpha + (1 - Self.idleAlpha) * env
+                let grow = 1 + 0.55 * env       // 峰值时半径 +55%
+                let alpha = base + (1 - base) * env
                 let r = Self.dotDiameter / 2 * grow
-                dotColors[slot].withAlphaComponent(alpha).setFill()
+                colors[slot].withAlphaComponent(alpha).setFill()
                 NSBezierPath(ovalIn: NSRect(x: center.x - r, y: center.y - r,
                                             width: r * 2, height: r * 2)).fill()
             }
         }
-
-        // ---------- 2. 额度轨（bullet graph）----------
-        // 填充长度 = 已用%，竖刻度 = 时间已过%。刻度被填充追上（超前 >5pt）
-        // 整条轨转琥珀色 = 烧得比线性快。
-        for (index, rail) in rails.enumerated() {
-            let rect = Self.railRect(index)
-            let used = min(1, max(0, rail.used))
-            let burning = rail.elapsed.map { used > $0 + 0.05 } ?? false
-            (burning ? NSColor.systemOrange
-                     : NSColor(calibratedWhite: 0.92, alpha: 1)).setFill()
-            NSBezierPath(roundedRect: NSRect(x: rect.minX, y: rect.minY,
-                                             width: rect.width * used, height: rect.height),
-                         xRadius: 1.5, yRadius: 1.5).fill()
-            if let elapsed = rail.elapsed {
-                let x = rect.minX + rect.width * min(1, max(0, elapsed)) - 1.5
-                NSColor(calibratedWhite: 1, alpha: 1).setFill()
-                NSBezierPath(roundedRect: NSRect(x: x, y: rect.minY - 2,
-                                                 width: 3, height: rect.height + 4),
-                             xRadius: 1.5, yRadius: 1.5).fill()
-            }
-        }
-
-        // ---------- 3. CPU / GPU 计量条 ----------
-        // 每个指标占固定槽位，关闭某项时另一项不移动。
-        let meters: [(value: Double?, shown: Bool, slot: Int, color: NSColor)] = [
-            (cpu, showCPU, 0, .systemTeal),
-            (gpu, showGPU, 1, .systemGreen),
-        ]
-        for meter in meters {
-            guard meter.shown, let value = meter.value else { continue }
-            let rect = Self.meterRect(slot: meter.slot)
-            meter.color.setFill()
-            let fillWidth = rect.width * min(1, max(0, value))
-            NSBezierPath(roundedRect: NSRect(x: rect.minX, y: rect.minY,
-                width: fillWidth, height: rect.height),
-                         xRadius: 3, yRadius: 3).fill()
-        }
     }
 }
-
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let dock = DockView(frame: NSRect(x: 0, y: 0, width: 128, height: 128))
     let sampler = SystemSampler()
@@ -1207,15 +1108,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hasData = quota != nil
         let stale = hasData && (errorText != nil
                                  || (updated.map { Date().timeIntervalSince($0) > 300 } ?? false))
-        // 状态串覆盖图标画的全部量：心跳等级、轨、CPU/GPU 值、显示开关、stale。
-        // 缺一样，那样变化时就少一次重绘（此前就漏过「关掉 CPU 开关图标不更新」）。
+        // 状态串只覆盖心跳点阵需要的量：各点等级。stale 单独计入——
+        // Codex 点在 stale 时照常跳（数据旧但速率还在），但详情窗口要能用
+        // 状态串感知 stale 变化。
         let beatsSignature = dock.beats.map { String(format: "%.3f", $0.level) }.joined(separator: ",")
-        let railsSignature = dock.rails.map { String(format: "%.3f/%.3f", $0.used, $0.elapsed ?? -1) }
-            .joined(separator: ",")
         staleForMenu = stale
-        let dockState = "beats:\(beatsSignature):\(railsSignature):"
-            + "\(Int((dock.cpu ?? -1) * 100)):\(Int((dock.gpu ?? -1) * 100)):"
-            + "\(config.showCPU):\(config.showGPU):stale:\(stale)"
+        let dockState = "beats:\(beatsSignature):stale:\(stale)"
         if dockState != lastDockState { NSApp.dockTile.display(); lastDockState = dockState }
         details.update(
             windows: (quota?.windows ?? []).map { value in
