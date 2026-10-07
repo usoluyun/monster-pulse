@@ -400,7 +400,15 @@ macOS 的内存压力等级。
 | 系统通知 `UNUserNotificationCenter` | ❌ 不可用 | `requestAuthorization` 返回 `granted=false` + `UNErrorDomain Code=1` |
 | 开机自启 `SMAppService.mainApp` | ✅ **可用** | `register()` 成功，status 由 `notFound` 变为 `enabled` |
 
-两者签名要求不同，**不要互相类推**。教训与 §验证纪律第 3 条同源：
+两者签名要求不同，**不要互相类推**。
+
+已据此实现开机自启（设置面板 → 「启动」分组），真机点验通过：
+`SMAppService.mainApp.register()` 成功，登录项记录为
+`Identifier: 2.local.monsterpulse` / `URL: /Applications/MonsterPulse.app` /
+`Disposition: [enabled, allowed, notified]`，且**未弹出任何授权对话框**。
+
+一并把额度轮询默认从 120 秒放宽到 300 秒：自启后应用整天常驻，
+120 秒意味着一天 720 次 codex 子进程查询。教训与 §验证纪律第 3 条同源：
 我拿「另一个功能的实测结论」当作本功能的证据，而没有真去测。
 - **推理阶段温度未测**。`/sys/class/thermal` 在 macOS 不存在，SMC 传感器读不到值，
   需 `powermetrics` + sudo。
