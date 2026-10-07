@@ -440,7 +440,7 @@ if CommandLine.arguments.contains("--settings-render-test") {
     // 把设置窗口离屏渲染成 PNG。与 --details-render-test 同一手法。
     // 用途：验证面板布局（新增控件有没有被挤出可视区），以及让用户直接看到
     // 每个配置项长什么样，不必靠猜。
-    // 用法: MonsterPulse --settings-render-test <out.png> [proxy|dns|nometers|full]
+    // 用法: MonsterPulse --settings-render-test <out.png> [proxy|dns|nometers|alerts-off|login-on|login-off|full]
     let args = Array(CommandLine.arguments.dropFirst(2))
     let out = args.first ?? "/tmp/monsterpulse-settings.png"
     let state = args.count > 1 ? args[1] : "full"
@@ -477,6 +477,13 @@ if CommandLine.arguments.contains("--settings-render-test") {
                                       diskAlertMBs: base.diskAlertMBs, proxyURL: "127.0.0.1:12334")
     }
     let controller = SettingsWindowController(config: config) { _ in }
+    // 自启状态是机器上的真实状态，不注入固定值的话，基线图会随用户是否开启过
+    // 自启而漂移。login-on / login-off 两个夹具把两种状态都画出来。
+    switch state {
+    case "login-on":  controller.renderLaunchAtLoginOverride = true
+    case "login-off": controller.renderLaunchAtLoginOverride = false
+    default:          break
+    }
     controller.renderAppearance = renderAppearance
     controller.renderToPNG(out)
     print("wrote \(out) state=\(state)")

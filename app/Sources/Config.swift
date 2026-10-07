@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 
 /// 用户配置。
 ///
@@ -16,7 +17,15 @@ struct Config {
     static let quotaIntervalRange: ClosedRange<Double> = 30...900
 
     static let defaultSystemInterval = 5.0
-    static let defaultQuotaInterval = 120.0
+    /// 额度轮询默认 5 分钟（原先 2 分钟）。
+    ///
+    /// 下调轮询频率是为了配合开机自启：自启后应用整天常驻，额度查询每次都要
+    /// spawn 一个 codex app-server 子进程。120 秒意味着一天 720 次，300 秒是 288 次。
+    /// 额度本身变化很慢——5 小时窗口里用掉 20% 通常要一小时以上，2 分钟与 5 分钟
+    /// 的显示差异远小于用户看 Dock 的间隔。
+    ///
+    /// 只改默认值不改区间：已显式设过值的用户配置会被保留，不被默认值覆盖。
+    static let defaultQuotaInterval = 300.0
 
     /// 预警阈值。取值范围同样有界，便于滑杆与文案一致。
     static let alertThresholdRange: ClosedRange<Double> = 5...90
@@ -192,6 +201,54 @@ struct Config {
 }
 
 
+// MARK: - 开机自启
+
+/// 「登录时启动」的封装。
+///
+/// **事实源是系统的 `SMAppService` 状态，不是本地配置。** 用户也可以在
+/// 「系统设置 → 通用 → 登录项」里改开关，所以面板里的勾选只是系统状态的显示，
+/// 不维护第二份真相。每次打开面板都重新读 `status`，别信上次写进去的值——
+/// 这正是 AGENTS.md 验证纪律第 3 条那个坑的翻版。
+enum LaunchAtLogin {
+    /// 没有 bundle id 就无法注册登录项。
+    ///
+    /// 实测（2026-10-07）：`--standalone` 产物无 Info.plist，查 `status` 不崩，
+    /// 返回 `.notFound`。所以这里不抛异常，只是功能不可用。
+    static var isSupported: Bool { Bundle.main.bundleIdentifier != nil }
+
+    /// 登录时是否会启动。`.requiresApproval` 也算「已开启」——注册请求已提交，
+    /// 只是还等用户在系统设置里放行。
+    static var isEnabled: Bool {
+        let status = SMAppService.mainApp.status
+        return status == .enabled || status == .requiresApproval
+    }
+
+    /// 系统实际状态的中文说明。措辞区分「待批准」，因为那一步必须用户自己做。
+    static var statusText: String {
+        guard isSupported else {
+            return "当前产物没有 bundle id，无法注册登录项（--standalone 形态不支持开机自启）"
+        }
+        switch SMAppService.mainApp.status {
+        case .enabled:      return "已启用：下次登录时由系统自动启动"
+        case .requiresApproval:
+            return "已注册，等待批准：需在「系统设置 → 通用 → 登录项」中打开本应用的开关"
+        case .notRegistered: return "未启用"
+        case .notFound:      return "系统未找到本应用的可登录项，请先从 .app 形态启动一次"
+        @unknown default:    return "系统返回了未知状态（rawValue \(SMAppService.mainApp.status.rawValue)）"
+        }
+    }
+
+    /// 打开登录项设置面板。失败时返回 false，由调用方决定是否提示。
+    @discardableResult
+    static func openSystemSettings() -> Bool {
+        // 面板扩展实测存在于 /System/Library/ExtensionKit/Extensions/LoginItems.appex。
+        // URL scheme 的实际跳转效果无法在终端验证，需用户点一次确认。
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension"),
+              NSWorkspace.shared.open(url) else { return false }
+        return true
+    }
+}
+
 // MARK: - 设置面板
 
 /// 设置窗口。改动即时生效（写 UserDefaults 并回调 AppDelegate），不设
@@ -205,6 +262,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let view: NSView
         let height: CGFloat
         let gapBefore: CGFloat
+        /// nil 表示占满内容宽度；给具体值则按内容宽排（左对齐），用于次要按钮。
+        var width: CGFloat?
     }
 
     private static let inset: CGFloat = 24
@@ -259,6 +318,12 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let proxyField = NSTextField(string: "")
     /// 用可换行标签：labelWithString 不换行，长提示会被截断（实测过）。
     private let proxyHint = NSTextField(wrappingLabelWithString: "")
+    // 开机自启
+    private let launchCheckbox = NSButton(checkboxWithTitle: "登录时自动启动",
+                                          target: nil, action: nil)
+    private let launchHint = NSTextField(wrappingLabelWithString: "")
+    private let launchSettingsButton = NSButton(title: "打开「登录项」设置…",
+                                                target: nil, action: nil)
 
     init(config: Config, onChange: @escaping (Config) -> Void) {
         self.config = config
@@ -281,9 +346,9 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         return label
     }
 
-    private func append(_ view: NSView, height: CGFloat, gapBefore: CGFloat) {
+    private func append(_ view: NSView, height: CGFloat, gapBefore: CGFloat, width: CGFloat? = nil) {
         content.addSubview(view)
-        rows.append(Row(view: view, height: height, gapBefore: gapBefore))
+        rows.append(Row(view: view, height: height, gapBefore: gapBefore, width: width))
     }
 
     private func buildRows() {
@@ -318,14 +383,16 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         proxyField.action = #selector(proxyFieldChanged)
         content.addSubview(proxyTitle)
         content.addSubview(proxyField)
-        rows.append(Row(view: proxyTitle, height: 17, gapBefore: 10))
-        rows.append(Row(view: proxyField, height: 20, gapBefore: -17))
+        rows.append(Row(view: proxyTitle, height: 17, gapBefore: 10, width: nil))
+        rows.append(Row(view: proxyField, height: 20, gapBefore: -17, width: nil))
         proxyHint.font = .systemFont(ofSize: 10)
         proxyHint.textColor = .secondaryLabelColor
         proxyHint.stringValue = "留空则不设代理。本应用从 Dock 启动、不经过 shell，因此读不到 .zshrc 里的代理。"
         content.addSubview(proxyHint)
         // 两行高度：提示文案较长，单行会被截断
-        rows.append(Row(view: proxyHint, height: 30, gapBefore: 5))
+        rows.append(Row(view: proxyHint, height: 30, gapBefore: 5, width: nil))
+
+        buildLaunchRows()
 
         let reset = NSButton(title: "恢复默认", target: self, action: #selector(resetToDefaults))
         content.addSubview(reset)
@@ -335,6 +402,20 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         window.contentView = content
         layoutRows()
         refreshControls()
+    }
+
+    /// 「启动」分组。自启状态由 `LaunchAtLogin` 从系统读，本地不留副本。
+    private func buildLaunchRows() {
+        append(heading("启动"), height: 15, gapBefore: 20)
+        launchCheckbox.target = self
+        launchCheckbox.action = #selector(launchCheckboxChanged)
+        append(launchCheckbox, height: 20, gapBefore: 10)
+        launchHint.font = .systemFont(ofSize: 10)
+        launchHint.textColor = .secondaryLabelColor
+        append(launchHint, height: 30, gapBefore: 5)
+        launchSettingsButton.target = self
+        launchSettingsButton.action = #selector(openLoginItems)
+        append(launchSettingsButton, height: 24, gapBefore: 6, width: 220)
     }
 
     private var resetButton: NSButton!
@@ -350,8 +431,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         slider.numberOfTickMarks = 0
         content.addSubview(label)
         content.addSubview(slider)
-        rows.append(Row(view: label, height: height, gapBefore: gapBefore))
-        rows.append(Row(view: slider, height: 0, gapBefore: 0))
+        rows.append(Row(view: label, height: height, gapBefore: gapBefore, width: nil))
+        rows.append(Row(view: slider, height: 0, gapBefore: 0, width: nil))
     }
 
     /// 从上往下排版，再按内容高度调整窗口。
@@ -362,7 +443,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     /// `max(0, …)` 使每个滑杆行多算一倍高度，窗口底部因此留出大片空白。
     /// 这里改成单趟遍历：只按当前行的 gapBefore 下移，遇到滑杆则复用上一标签的 y。
     private func layoutRows() {
-        var cursor = content.bounds.height
+        // 从 content.bounds.height - inset 起排，留出顶部内边距。
+        //
+        // 此前从 bounds.height 起排，等于把首行顶到内容视图的最上沿：顶部 24pt
+        // 内边距整个没落到内容上，改为在底部多留 24pt 死白。窗口高度是按
+        // contentHeight + 2*inset + bottomBar 算的，所以底部那段空白看起来「正常」，
+        // 布局诊断也判「足够」——它只查够不够高，查不出留白摆错了位置。
+        var cursor = content.bounds.height - Self.inset
         var pairedLabelY: CGFloat?
         for row in rows {
             if row.gapBefore > 0 { cursor -= row.gapBefore }
@@ -374,7 +461,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
                 continue
             }
             row.view.frame = NSRect(x: Self.inset, y: cursor,
-                                    width: Self.windowWidth - Self.inset * 2, height: row.height)
+                                    width: row.width ?? (Self.windowWidth - Self.inset * 2),
+                                    height: row.height)
             pairedLabelY = (row.view is NSTextField && !(row.view is NSSlider)) ? cursor : nil
         }
     }
@@ -413,10 +501,15 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let needed = contentHeight + Self.inset * 2 + Self.bottomBar
         let capacity = window.contentLayoutRect.height
         let topMost = rows.map { $0.view.frame.maxY }.max() ?? 0
-        return String(format: "需要 %.0fpt，窗口提供 %.0fpt，%@；最上元素顶端 %.0fpt %@",
+        // 顶部留白必须接近 inset。少了说明首行顶到了上沿；多了说明内边距
+        // 被挪到了底部。这条判据是靠肉眼看出来的 bug，只查「够不够高」查不出。
+        let topGap = capacity - topMost
+        let gapOK = abs(topGap - Self.inset) <= 1.5
+        return String(format: "需要 %.0fpt，窗口提供 %.0fpt，%@；最上元素顶端 %.0fpt %@；顶部留白 %.0fpt %@",
                       needed, capacity,
                       capacity + 0.5 >= needed ? "足够" : "不足(顶部被裁)",
-                      topMost, capacity + 0.5 >= topMost ? "在可视区内" : "超出可视区")
+                      topMost, capacity + 0.5 >= topMost ? "在可视区内" : "超出可视区",
+                      topGap, gapOK ? "正常" : "异常(应为 \(Int(Self.inset))pt)")
     }
 
     // MARK: 交互
@@ -451,7 +544,57 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         streakSlider.doubleValue = config.alertFailureStreak
         diskSlider.doubleValue = config.diskAlertMBs
         proxyField.stringValue = config.proxyURL
+        refreshLaunchControls()
         updateLabels()
+    }
+
+    /// 开机自启控件。勾选状态与提示文案**一律从系统读**，不读本地配置。
+    ///
+    /// 视觉回归要可重复，而自启状态是机器上的真实状态（用户可能已在系统设置里
+    /// 改过），所以离屏渲染时由夹具注入固定值，避免基线图随机器状态漂移。
+    /// 这不是造自己的环境——渲染只画外观，不验证注册行为，注册行为另有实测。
+    var renderLaunchAtLoginOverride: Bool?
+
+    private func refreshLaunchControls() {
+        let supported = LaunchAtLogin.isSupported
+        if let override = renderLaunchAtLoginOverride {
+            launchCheckbox.state = override ? .on : .off
+            launchHint.stringValue = override
+                ? "渲染夹具：模拟已启用状态（真实状态从系统登录项读取）"
+                : "渲染夹具：模拟未启用状态"
+        } else {
+            launchCheckbox.state = LaunchAtLogin.isEnabled ? .on : .off
+            launchHint.stringValue = LaunchAtLogin.statusText
+        }
+        launchCheckbox.isEnabled = supported
+        launchSettingsButton.isEnabled = supported
+    }
+
+    @objc private func launchCheckboxChanged() {
+        guard LaunchAtLogin.isSupported else { refreshLaunchControls(); return }
+        let want = launchCheckbox.state == .on
+        do {
+            if want {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            let ns = error as NSError
+            NSLog("SMAppService %@ 失败: %@ %ld %@",
+                  want ? "register" : "unregister", ns.domain, ns.code, ns.localizedDescription)
+        }
+        // 无论成败都重读系统状态：失败时勾选会被纠正回真实值，
+        // 而不是留下「面板说开了、系统其实没开」的错觉。
+        refreshLaunchControls()
+    }
+
+    @objc private func openLoginItems() {
+        if LaunchAtLogin.openSystemSettings() { return }
+        let alert = NSAlert()
+        alert.messageText = "无法打开登录项设置"
+        alert.informativeText = "请手动前往「系统设置 → 通用 → 登录项」查看本应用。"
+        alert.runModal()
     }
 
     private func updateLabels() {
@@ -525,6 +668,10 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             content.appearance = appearance
             window.appearance = appearance
         }
+        // 夹具是在 init 之后才注入的（renderLaunchAtLoginOverride / renderAppearance），
+        // 而 refreshControls() 在 buildRows() 里已经跑过一次。不重刷就等于用注入前
+        // 的状态出图——login-on 夹具会画出「未启用」，看起来像功能没实现。
+        refreshControls()
         resizeWindow()
         guard let content = window.contentView else { return }
         content.layoutSubtreeIfNeeded()

@@ -70,6 +70,8 @@ SETTINGS_CASES=(
   "settings-nometers"
   "settings-alerts-off"
   "settings-dns"
+  "settings-login-on"
+  "settings-login-off"
 )
 
 mkdir -p "$BASE"
@@ -135,9 +137,12 @@ for state in "${SETTINGS_CASES[@]}"; do
   # 「不足(顶部被裁)」意味着窗口没长够高、最上面几项在可视区之外。
   # 这正是「看不到顶部设置」的成因：只改 content.frame 不会让窗口变高，
   # 而离屏渲染按 content.frame 渲染所以看不出来。必须在这里拦住。
+  #
+  # 「异常(应为 24pt)」是另一类：窗口够高，但顶部内边距没落到内容上，
+  # 首行被顶到上沿、底部多出一块死白。只查「够不够高」发现不了。
   case "$diag" in
-    *"不足"*|*"超出可视区"*)
-      echo "  FAIL  $state 布局被裁：$diag"; fail=$((fail+1)); continue ;;
+    *"不足"*|*"超出可视区"*|*"异常"*)
+      echo "  FAIL  $state 布局异常：$diag"; fail=$((fail+1)); continue ;;
   esac
   compare "$state" "$WORK/$state.png"
 done

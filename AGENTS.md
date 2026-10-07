@@ -27,7 +27,7 @@ Swift + AppKit，零第三方依赖。`app/` 是全部源码，`app/Sources/` �
 ```sh
 bash app/build.sh                      # Release(-O)，产物在 app/.build/
 app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse --self-test
-bash app/tests/render-regress.sh       # 视觉回归（26 个用例，容差 24）
+bash app/tests/render-regress.sh       # 视觉回归（28 个用例，容差 24）
 bash app/tests/run-abnormal-tests.sh   # 查询失败 10 场景
 bash app/tests/run-termination-tests.sh # 退出路径 2 条
 bash app/tests/run-perf-test.sh        # 性能验收（3 轮，约 75 分钟）
@@ -41,7 +41,7 @@ bash app/tests/run-perf-test.sh        # 性能验收（3 轮，约 75 分钟）
 | `--probe` | 读真实额度，单次。非零退出即失败，不用模拟值代替 |
 | `--render-test` | Dock 图标离屏渲染，规格见 `tests/render-regress.sh` 的 `CASES` |
 | `--details-render-test` | 详情窗口离屏渲染：`normal` / `no-data` / `stale` / `error` / `loading` / `*-no-meters` / `no-gpu` |
-| `--settings-render-test` | 设置面板离屏渲染，并输出 `layout:` 诊断（`render-regress.sh` 据此判 FAIL） |
+| `--settings-render-test` | 设置面板离屏渲染，并输出 `layout:` 诊断（`render-regress.sh` 据此判 FAIL）。状态：`proxy` / `dns` / `nometers` / `alerts-off` / `login-on` / `login-off` / `full` |
 | `--dock-menu-dump` | 打印 Dock 菜单的启用态、标题与 action 选择器，人工点验时的对照依据 |
 | `--draw-bench` | 单帧 draw 成本微基准 |
 
@@ -117,6 +117,12 @@ Dock 启动就永远查询超时。**我在终端验证了很多轮，方向完�
 
 快照只能告诉你「变了」，不能告诉你「变错了」。所以除了逐像素比对，还要断言
 语义条件——例如设置面板的 `layout:` 诊断必须报告「足够」，而不只是「和上次一样」。
+
+「够高」和「留白摆对了位置」是两件事。设置面板曾一直缺顶部内边距：
+`layoutRows()` 从 `content.bounds.height` 起排，首行被顶到内容视图最上沿，
+24pt 内边距整份挪到了底部变成死白。原有诊断只查「需要多少 / 提供多少」，
+判「足够」，所以一直没发现——**判据要覆盖出错的那个维度**，不能只查自己想到的
+那个。现在诊断额外报「顶部留白」并要求接近 inset。
 
 同理，视觉基准图**必须由当前构建生成**，容差 24（CoreText 抗锯齿跨编译抖动约
 22/255；同一二进制两次渲染差异为 0）。容器输入固定化，不要用 `Date()`。
