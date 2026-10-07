@@ -442,10 +442,19 @@ if CommandLine.arguments.contains("--render-test") {
     // 各分支纳入视觉回归——默认不画，保证既有基准图不受影响。
     let extras = args.count > 6 ? args[6].split(separator: ",").map(String.init) : []
     for extra in extras {
-        let parts = extra.split(separator: "=").map(String.init)
+        // maxSplits=1 且允许没有 "="：无值开关（nogpu / nogpumeter）和
+        // 带值参数（gpu=0.5）要分开处理。原先用 `guard parts.count == 2` 一刀切，
+        // 结果 nogpumeter 被静默跳过——「配置关闭 GPU」的用例照样画着绿条，
+        // 而它因为没传 gpu 又碰巧画对了。无值开关被跳过时不会报错，只会
+        // 让夹具悄悄退化成另一种状态。
+        let parts = extra.split(separator: "=", maxSplits: 1).map(String.init)
+        let key = parts[0]
+        if key == "nogpu" { view.gpu = nil; continue }
+        if key == "nogpumeter" { view.showGPU = false; continue }
         guard parts.count == 2, let value = Double(parts[1]) else { continue }
-        if parts[0] == "pace" { view.paceMarker = value }
-        if parts[0] == "activity" { view.activity = value; view.pulse = value }
+        if key == "pace" { view.paceMarker = value }
+        if key == "activity" { view.activity = value; view.pulse = value }
+        if key == "gpu" { view.gpu = value }
     }
     let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
     view.cacheDisplay(in: view.bounds, to: bitmap)
@@ -659,9 +668,13 @@ if CommandLine.arguments.contains("--probe") {
 final class DockView: NSView {
     var remaining: Int?
     var cpu: Double?
+    /// GPU 占用（0...1）。跑本地大模型时这是判断「机器在不在算」的唯一指标，
+    /// 所以进了 Dock 图标而不是只留在详情窗口。
+    var gpu: Double?
     var memory: Double?
     var stale = false
     var showCPU = true
+    var showGPU = true
     var showMemory = true
     /// 额度窗口已过的时间比例（0...1），在额度条上标为一道 1pt 亮线。
     /// 与填充长度对比即可看出用量是超前还是落后于时间进度。
@@ -715,13 +728,25 @@ final class DockView: NSView {
         image.draw(in: NSRect(x: 4, y: y, width: 120, height: size + 9))
     }
 
+    /// 计量条槽位数。CPU / GPU / 内存各占一个固定槽位。
+    ///
+    /// 间距从两根时的 13 收到 10，是为了让第三根落在底边上沿之内
+    /// （圆角背板 inset 5，最后一根底边 12，留 7pt）。代价是每根只有 6pt 高。
+    static let meterSlots = 3
+    private static let meterHeight: CGFloat = 6
+    private static let meterPitch: CGFloat = 10
+    private static func meterRect(slot: Int) -> NSRect {
+        NSRect(x: 19, y: 32 - CGFloat(slot) * Self.meterPitch,
+               width: 90, height: Self.meterHeight)
+    }
+
     private func makeBackdrop() -> NSImage {
         NSImage(size: bounds.size, flipped: false) { rect in
             NSColor(calibratedWhite: 0.10, alpha: 1).setFill()
             NSBezierPath(roundedRect: rect.insetBy(dx: 5, dy: 5), xRadius: 24, yRadius: 24).fill()
             NSColor.darkGray.setFill()
-            for index in 0..<2 {
-                let bar = NSRect(x: 19, y: 32 - index * 13, width: 90, height: 7)
+            for slot in 0..<DockView.meterSlots {
+                let bar = DockView.meterRect(slot: slot)
                 NSBezierPath(roundedRect: bar, xRadius: 3, yRadius: 3).fill()
             }
             return true
@@ -749,15 +774,17 @@ final class DockView: NSView {
         // 避免用户切开关时图标里另一根条跳位。
         let meters: [(value: Double?, shown: Bool, slot: Int, color: NSColor)] = [
             (cpu, showCPU, 0, .systemTeal),
-            (memory, showMemory, 1, .systemPurple),
+            (gpu, showGPU, 1, .systemGreen),
+            (memory, showMemory, 2, .systemPurple),
         ]
         for meter in meters {
             guard meter.shown, let value = meter.value else { continue }
-            let rect = NSRect(x: 19, y: 32 - meter.slot * 13, width: 90, height: 7)
+            let rect = Self.meterRect(slot: meter.slot)
             meter.color.setFill()
             let fillWidth = rect.width * min(1, max(0, value))
             NSBezierPath(roundedRect: NSRect(x: rect.minX, y: rect.minY,
-                width: fillWidth, height: 7), xRadius: 3, yRadius: 3).fill()
+                width: fillWidth, height: rect.height),
+                         xRadius: 3, yRadius: 3).fill()
 
             // CPU 条内的亮点：在已填充部分内来回流动，速度 ∝ 忙碌度。
             // 忙碌度接近 0 时不画——此时定时器也不运行，静止期零开销。
@@ -767,7 +794,7 @@ final class DockView: NSView {
                 let alpha = 0.35 + 0.65 * min(1, act)
                 NSColor.white.withAlphaComponent(alpha).setFill()
                 NSBezierPath(ovalIn: NSRect(x: x, y: rect.minY - 1.5,
-                                            width: 4, height: 10)).fill()
+                                            width: 4, height: rect.height + 3)).fill()
             }
         }
 
@@ -927,7 +954,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func tick() {
         guard !sleeping else { return }
         let data = sampler.sample()
-        dock.cpu = data.cpu; dock.memory = data.memoryFraction
+        dock.cpu = data.cpu; dock.gpu = data.gpu?.deviceUtilization; dock.memory = data.memoryFraction
         dock.activity = config.showCPU ? data.cpu : nil
         system = data
         logSample(data)
@@ -1110,6 +1137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dock.stale = hasData && (errorText != nil
                                   || (updated.map { Date().timeIntervalSince($0) > 300 } ?? false))
         dock.showCPU = config.showCPU
+        dock.showGPU = config.showGPU
         dock.showMemory = config.showMemory
         // 开关必须计入状态串：否则用户关掉 CPU 后图标内容变了却不会重绘
         let pace = dock.paceMarker.map { String(format: "%.3f", $0) } ?? "-"

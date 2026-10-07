@@ -292,7 +292,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
                                         target: nil, action: nil)
     private let memoryCheckbox = NSButton(checkboxWithTitle: "在图标与详情中显示内存",
                                           target: nil, action: nil)
-    private let gpuCheckbox = NSButton(checkboxWithTitle: "在详情中显示 GPU 占用",
+    private let gpuCheckbox = NSButton(checkboxWithTitle: "在图标与详情中显示 GPU 占用",
                                        target: nil, action: nil)
     // 预警
     private let alertsCheckbox = NSButton(checkboxWithTitle: "启用额度预警（Dock 图标跳动）",

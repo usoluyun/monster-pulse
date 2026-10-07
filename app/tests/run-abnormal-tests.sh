@@ -148,7 +148,11 @@ echo
 echo "结果：PASS $pass / FAIL $fail"
 echo
 echo "未覆盖（需真机操作，不能靠注入伪造）："
-echo "  · 系统睡眠与唤醒：willSleep/didWake 由系统在真实睡眠时发出，无法注入伪造"
 echo "  · 查询进行中退出的子进程回收：需跑真实 GUI 应用，另见 run-termination-tests.sh"
+echo
+echo "已用真机覆盖（脚本化，app/tests/sleep-wake-probe.sh）："
+echo "  · 系统睡眠与唤醒：willSleep/didWake 由系统在真实睡眠时发出，无法注入伪造，"
+echo "    所以走真机 Clamshell Sleep。2026-10-07 实测两个通知都收到，时间能与"
+echo "    pmset 对上；并测得 systemUptime 跨睡眠只走 5.5%，不能当时间分母。"
 
 [ "$fail" -eq 0 ] || exit 1
