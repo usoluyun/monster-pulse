@@ -19,3 +19,5 @@ Copyright (c) 2026 usoluyun。源代码与文档文本采用 [MIT License](LICEN
 需要复用角色或相关素材，请另行取得原著作权人的授权。若要将代码用于自己的项目，可替换为自有或已获授权的图标，再运行 `bash app/generate-icon.sh` 生成应用图标。
 
 代码许可与素材版权应同时保留。素材目录中的 [LICENSE.txt](app/Resources/LICENSE.txt) 提供英文版权说明。
+
+`app/Sources/MonsterModel.swift` 中由角色素材派生的轮廓坐标同属上述形象版权范围；其余算法与应用代码沿用 MIT 授权。

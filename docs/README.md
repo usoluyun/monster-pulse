@@ -1,6 +1,12 @@
 # Monster Pulse 文档
 
+## 规划
+
+- [项目里程碑](roadmap.md)：当前阶段完成情况及后三个里程碑的范围、依赖和验收标准。
+
 ## 设计
+
+- [Monster 视图设计与实现](monster-view-design.md)：原生视图切换、额度填充、太阳、代理地面色与外观配置。
 
 - [可行性方案与 PoC 设计](codex-dock-feasibility.md)：产品范围、数据来源、技术实现与性能验收方法。
 

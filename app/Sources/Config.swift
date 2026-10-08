@@ -46,6 +46,7 @@ struct Config {
         static let showCPU = "showCPU"
         static let showMemory = "showMemory"
         static let showGPU = "showGPU"
+        static let showDisk = "showDisk"
         static let alertsEnabled = "alertsEnabled"
         static let alertThreshold = "alertQuotaThreshold"
         static let alertLead = "alertResetLeadMinutes"
@@ -60,6 +61,7 @@ struct Config {
     var showMemory: Bool
     /// GPU 占用是否显示。跑本地大模型时这是唯一有区分度的指标。
     var showGPU: Bool
+    var showDisk: Bool = true
     var alertsEnabled: Bool
     /// 主额度窗口剩余低于此百分比即预警
     var alertQuotaThreshold: Double
@@ -79,6 +81,8 @@ struct Config {
     /// 注意这会以明文存进 UserDefaults（本项目只代理 localhost，一般不含凭据）。
     var proxyURL: String
 
+    var monster = MonsterAppearance()
+
     static let `default` = Config(systemInterval: defaultSystemInterval,
                                   quotaInterval: defaultQuotaInterval,
                                   showCPU: true, showMemory: true, showGPU: true,
@@ -97,6 +101,7 @@ struct Config {
             Key.showCPU: true,
             Key.showMemory: true,
             Key.showGPU: true,
+            Key.showDisk: true,
             Key.alertsEnabled: true,
             Key.alertThreshold: defaultAlertThreshold,
             Key.alertLead: defaultAlertLead,
@@ -113,14 +118,15 @@ struct Config {
             guard value.isFinite, range.contains(value) else { return fallback }
             return value
         }
-        return Config(
+        var config = Config(
             systemInterval: clamp(d.double(forKey: Key.systemInterval),
                                    systemIntervalRange, defaultSystemInterval),
             quotaInterval: clamp(d.double(forKey: Key.quotaInterval),
                                  quotaIntervalRange, defaultQuotaInterval),
             showCPU: d.bool(forKey: Key.showCPU),
-            showMemory: true,
+            showMemory: d.bool(forKey: Key.showMemory),
             showGPU: d.bool(forKey: Key.showGPU),
+            showDisk: d.bool(forKey: Key.showDisk),
             alertsEnabled: d.bool(forKey: Key.alertsEnabled),
             alertQuotaThreshold: clamp(d.double(forKey: Key.alertThreshold),
                                        alertThresholdRange, defaultAlertThreshold),
@@ -131,6 +137,11 @@ struct Config {
             diskAlertMBs: clamp(d.double(forKey: Key.diskAlertThreshold),
                                 diskAlertRange, defaultDiskAlert),
             proxyURL: d.string(forKey: Key.proxyURL) ?? "")
+        if let data = d.data(forKey: "monsterAppearance"),
+           let value = try? JSONDecoder().decode(MonsterAppearance.self, from: data) {
+            config.monster = value.validated()
+        }
+        return config
     }
 
     /// 保存单项变更。写入即生效，由调用方负责重启定时器。
@@ -153,6 +164,10 @@ struct Config {
     mutating func setShowGPU(_ value: Bool) {
         showGPU = value
         UserDefaults.standard.set(value, forKey: Key.showGPU)
+    }
+    mutating func setShowDisk(_ value: Bool) {
+        showDisk = value
+        UserDefaults.standard.set(value, forKey: Key.showDisk)
     }
     mutating func setAlertsEnabled(_ value: Bool) {
         alertsEnabled = value
@@ -181,14 +196,21 @@ struct Config {
         UserDefaults.standard.set(proxyURL, forKey: Key.proxyURL)
     }
 
+    mutating func setMonster(_ value: MonsterAppearance) {
+        monster = value.validated()
+        if let data = try? JSONEncoder().encode(monster) {
+            UserDefaults.standard.set(data, forKey: "monsterAppearance")
+        }
+    }
+
     /// 规范化后的代理，nil 表示不设代理。查询时注入子进程环境。
     var effectiveProxy: String? { ProxySetting.normalize(proxyURL) }
 
     mutating func resetToDefaults() {
         self = .default
         for key in [Key.systemInterval, Key.quotaInterval, Key.showCPU, Key.showMemory,
-                    Key.showGPU, Key.alertsEnabled, Key.alertThreshold, Key.alertLead, Key.alertStreak,
-                    Key.diskAlertThreshold, Key.proxyURL] {
+                    Key.showGPU, Key.showDisk, Key.alertsEnabled, Key.alertThreshold, Key.alertLead, Key.alertStreak,
+                    Key.diskAlertThreshold, Key.proxyURL, "monsterAppearance"] {
             UserDefaults.standard.removeObject(forKey: key)
         }
     }
@@ -291,6 +313,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
                                         target: nil, action: nil)
     private let gpuCheckbox = NSButton(checkboxWithTitle: "在图标与详情中显示 GPU 占用",
                                        target: nil, action: nil)
+    private let memoryCheckbox = NSButton(checkboxWithTitle: "在图标与详情中显示内存", target: nil, action: nil)
+    private let diskCheckbox = NSButton(checkboxWithTitle: "在图标与详情中显示磁盘读写", target: nil, action: nil)
     // 预警
     private let alertsCheckbox = NSButton(checkboxWithTitle: "启用额度预警（Dock 图标跳动）",
                                           target: nil, action: nil)
@@ -350,16 +374,24 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     private func buildRows() {
         content.wantsLayer = true
+        let monsterButton = NSButton(title: "Monster 外观…", target: self, action: #selector(openMonsterAppearance))
+        monsterAppearanceButton = monsterButton
+        content.addSubview(monsterButton)
         append(heading("刷新频率"), height: 15, gapBefore: 0)
         appendSlider(systemLabel, systemSlider, height: 17, gapBefore: 10)
         appendSlider(quotaLabel, quotaSlider, height: 17, gapBefore: 8)
 
         append(heading("显示"), height: 15, gapBefore: 20)
-        for box in [cpuCheckbox, gpuCheckbox] {
+        for box in [cpuCheckbox, gpuCheckbox, memoryCheckbox, diskCheckbox] {
             box.target = self
             box.action = #selector(checkboxChanged(_:))
             append(box, height: 20, gapBefore: box === cpuCheckbox ? 10 : 4)
         }
+
+        let meterHint = NSTextField(wrappingLabelWithString: "图标上排 CPU / GPU，下排内存 / 磁盘。磁盘左橙读、右黄写，满格 800 MB/s；隐藏后其余柱状图自动填满。")
+        meterHint.font = .systemFont(ofSize: 11)
+        meterHint.textColor = .secondaryLabelColor
+        append(meterHint, height: 32, gapBefore: 6)
 
         append(heading("预警"), height: 15, gapBefore: 20)
         alertsCheckbox.target = self
@@ -416,6 +448,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 
     private var resetButton: NSButton!
+    private var monsterAppearanceButton: NSButton!
 
     /// 一个「标签 + 滑杆」行。两视图共用同一行的纵向位置与高度，
     /// 所以只由标签行计入高度，滑杆行 height=0、gapBefore=0，只负责定位。
@@ -486,6 +519,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         window.setContentSize(NSSize(width: Self.windowWidth, height: height))
         layoutRows()
         resetButton.frame = NSRect(x: Self.inset, y: 14, width: 100, height: 28)
+        monsterAppearanceButton.frame = NSRect(x: 144, y: 14, width: 190, height: 28)
     }
 
     /// 诊断用：内容实际需要多高、窗口**实际提供**多高的内容区、有没有把顶部裁掉。
@@ -507,6 +541,19 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
                       capacity + 0.5 >= needed ? "足够" : "不足(顶部被裁)",
                       topMost, capacity + 0.5 >= topMost ? "在可视区内" : "超出可视区",
                       topGap, gapOK ? "正常" : "异常(应为 \(Int(Self.inset))pt)")
+    }
+
+    func updateConfig(_ value: Config) { config = value; refreshControls() }
+    private var monsterSettings: MonsterSettingsController?
+    @objc private func openMonsterAppearance() {
+        monsterSettings = MonsterSettingsController(appearance: config.monster) { [weak self] value in
+            guard let self else { return }
+            var current = value
+            current.enabled = self.config.monster.enabled
+            self.config.setMonster(current)
+            self.onChange(self.config)
+        }
+        monsterSettings?.show()
     }
 
     // MARK: 交互
@@ -534,6 +581,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         quotaSlider.doubleValue = config.quotaInterval
         cpuCheckbox.state = config.showCPU ? .on : .off
         gpuCheckbox.state = config.showGPU ? .on : .off
+        memoryCheckbox.state = config.showMemory ? .on : .off
+        diskCheckbox.state = config.showDisk ? .on : .off
         alertsCheckbox.state = config.alertsEnabled ? .on : .off
         thresholdSlider.doubleValue = config.alertQuotaThreshold
         leadSlider.doubleValue = config.alertResetLeadMinutes
@@ -638,6 +687,10 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             config.setShowCPU(sender.state == .on)
         } else if sender === gpuCheckbox {
             config.setShowGPU(sender.state == .on)
+        } else if sender === memoryCheckbox {
+            config.setShowMemory(sender.state == .on)
+        } else if sender === diskCheckbox {
+            config.setShowDisk(sender.state == .on)
         } else {
             config.setAlertsEnabled(sender.state == .on)
         }
@@ -675,7 +728,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         //
         // 必须在设完 appearance 之后再取 cgColor，否则动态色会按当时的当前外观
         // 解析，而不是 darkAqua——那就等于白垫。
-        content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        if let appearance = renderAppearance {
+            appearance.performAsCurrentDrawingAppearance {
+                content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+            }
+        } else {
+            content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        }
         // 夹具是在 init 之后才注入的（renderLaunchAtLoginOverride / renderAppearance），
         // 而 refreshControls() 在 buildRows() 里已经跑过一次。不重刷就等于用注入前
         // 的状态出图——login-on 夹具会画出「未启用」，看起来像功能没实现。

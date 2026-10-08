@@ -38,6 +38,12 @@ struct Quota {
 /// 放在领域层而非展示层：详情窗口、Dock 菜单、预警文案都要用同一套写法，
 /// 且这些是纯函数，可以在 --self-test 里断言（AppKit 起来之前就能跑）。
 enum SystemFormat {
+    /// Dock 磁盘读写使用固定量程，避免把速率误画成磁盘忙碌百分比。
+    static func dockDiskFraction(_ bytesPerSecond: Double?) -> Double? {
+        guard let rate = bytesPerSecond, rate.isFinite, rate >= 0 else { return nil }
+        return min(1, rate / (800 * 1_048_576))
+    }
+
     /// 字节数 → 「12.4 GB」/「860 MB」。用 1024 进制并保留一位小数。
     static func bytes(_ value: Double?) -> String {
         guard let value, value.isFinite, value >= 0 else { return "—" }

@@ -237,3 +237,19 @@ RSS 的增长几乎全部发生在头 60 秒（95 → 113 MB，属首帧绘制�
 详细分析及性能验收流程：[方案文档](codex-dock-feasibility.md)。
 阶段性验证结论（各项实测数据、数据缺陷、结论边界、方法论与踩坑记录）：
 [验证报告](codex-dock-verification.md)。
+
+
+## 2026-10-08 · 原生 Monster 视图
+
+主窗口顶部「仪表 / Monster」切换同时作用于 Dock，每次启动默认显示仪表。Monster 页不设额外详情按钮，切换仪表查看精确数值；右下角打开设置，设置底部进入「Monster 外观…」。角色白色面积、太阳和地面分别表示 5h 剩余、周剩余与系统代理状态；外圈表示 5h 时间、内圈表示周时间，主窗口增加重置倒计时，详细语义见 [设计与实现](monster-view-design.md)。
+
+新增离屏入口（固定夹具，不写真实配置）：
+
+```sh
+APP=app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse
+$APP --monster-render-test /tmp/monster.png normal
+$APP --monster-window-render-test /tmp/monster-window.png normal
+$APP --monster-settings-render-test /tmp/monster-settings.png normal
+```
+
+`render-regress.sh` 当前覆盖 74 张图和 3 组语义检查，其中 Monster 检查身体白色面积、代理地面色、动画相位、隐藏指标后的静态姿态、独立时间环及 43pt 四角。经实际看图确认后，可用 `--update-ui` 只更新窗口与 Monster 基准，保留仪表 Dock 基准。`--draw-bench` 同时测量仪表和 Monster 单帧绘制；它不包含 WindowServer 合成及长时间动画能耗。

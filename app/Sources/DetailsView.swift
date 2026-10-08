@@ -218,7 +218,7 @@ final class DetailsView: NSView {
     /// 结构化数据入口。AppDelegate 只负责取数与判断 stale，视图不含任何业务规则。
     func update(windows: [(title: String, used: Int, remaining: Int, reset: String?)],
                 quotaAvailable: Bool, cpu: Double?, reading: SystemReading,
-                showCPU: Bool, showMemory: Bool, showGPU: Bool,
+                showCPU: Bool, showMemory: Bool, showGPU: Bool, showDisk: Bool? = nil,
                 updated: Date?, loading: Bool, errorText: String?, stale: Bool) {
         if quotaRows.count != windows.count {
             quotaRows.forEach { $0.removeFromSuperview() }
@@ -244,11 +244,12 @@ final class DetailsView: NSView {
         // 内存区从「一个占比数字」换成三行实测指标，因为占比看不出磁盘 I/O：
         // 跑本地大模型时最刺眼的是读权重的速率，而内存占比对此一无所知。
         memoryRow.isHidden = !showMemory
-        diskRow.isHidden = !showMemory
+        diskRow.isHidden = !(showDisk ?? showMemory)
+        diskRow.update(rate: reading.diskReadBytesPerSecond)
         memoryDetail.isHidden = !showMemory
         if showMemory {
             memoryRow.update(reading.memoryFraction)
-            diskRow.update(rate: reading.diskReadBytesPerSecond)
+
             // 已用内存 = 占比 × 总量。占比本身是近似口径，所以这里标「约」。
             let used = reading.memoryFraction.map { $0 * reading.physicalBytes }
             var parts = ["内存 \(SystemFormat.bytes(used)) / \(SystemFormat.bytes(reading.physicalBytes > 0 ? reading.physicalBytes : nil))"]

@@ -67,6 +67,49 @@ func verify() throws {
     // stderr 在 trap 前不冲刷，失败时看不到是哪一条（实测踩过），
     // 且一次只能暴露一条。改成先跑完全部用例再汇总输出。
     var failures: [String] = []
+    let unknownSummary = MonsterSummary.text(remaining:nil,week:nil,cpu:nil,gpu:nil,showCPU:false,proxy:nil,stale:false)
+    let ringNow = Date(timeIntervalSince1970:1_700_000_000)
+    for (minutes,fraction) in [(300,0.4),(10080,0.28)] {
+        let reset = ringNow.addingTimeInterval(Double(minutes)*60*(1-fraction))
+        for used in [0.0,90.0] {
+            let time = MonsterTimeWindow(window:QuotaWindow(used:used,minutes:minutes,resetsAt:reset),now:ringNow)
+            if abs((time.progress ?? -1)-fraction) > 0.000001 { failures.append("Monster 时间独立于额度 \(minutes)") }
+        }
+    }
+    for window in [nil,QuotaWindow(used:30,minutes:nil,resetsAt:ringNow),QuotaWindow(used:30,minutes:300,resetsAt:nil),
+                   QuotaWindow(used:30,minutes:300,resetsAt:ringNow.addingTimeInterval(18001))] as [QuotaWindow?] {
+        if MonsterTimeWindow(window:window,now:ringNow).progress != nil { failures.append("Monster 不可信时间不能画进度") }
+    }
+    let expiredTime = MonsterTimeWindow(window:QuotaWindow(used:30,minutes:300,resetsAt:ringNow.addingTimeInterval(-1)),now:ringNow)
+    if expiredTime.progress != 1 || !expiredTime.text(title:"5h 外圈",now:ringNow).contains("等待刷新") { failures.append("Monster 到期时间") }
+    for (inset,radius) in [(6.5,21.5),(12.0,16.0)] {
+        let points = MonsterTimeRing.points(progress:1,inset:inset,radius:radius)
+        if hypot(points.last!.x-64,points.last!.y-inset) > 0.000001 { failures.append("Monster 时间环必须闭合") }
+        let quarter = MonsterTimeRing.points(progress:0.25,inset:inset,radius:radius).last!
+        if hypot(quarter.x-(128-inset),quarter.y-64) > 0.000001 { failures.append("Monster 时间环按弧长增长") }
+        for point in points {
+            // Include half the 2.4pt stroke in the rounded-mask clearance check.
+            let cx = min(102.4,max(25.6,point.x)), cy = min(102.4,max(25.6,point.y))
+            if hypot(point.x-cx,point.y-cy)+1.2 > 25.6 { failures.append("Monster 时间环圆角裁切") ; break }
+        }
+    }
+    if !unknownSummary.contains("CPU 隐藏") || !unknownSummary.contains("GPU —") || !unknownSummary.contains("系统代理 未知") {
+        failures.append("Monster 未知与隐藏摘要")
+    }
+    for percent in [0.0, 0.15, 0.5, 0.7, 1.0] {
+        let cutoff = MonsterGeometry.cutoff(remaining: percent)
+        if abs(MonsterGeometry.whiteFraction(cutoff: cutoff)-percent) > 0.0001 {
+            failures.append("Monster 白色面积映射 \(percent)")
+        }
+    }
+    var invalidMonster = MonsterAppearance()
+    invalidMonster.size = .nan; invalidMonster.intensity = 999; invalidMonster.usedColor = "invalid"
+    invalidMonster.shortRingColor = "bad"; invalidMonster.weekRingColor = "#12345z"
+    let checkedMonster = invalidMonster.validated()
+    if checkedMonster.size != 100 || checkedMonster.intensity != 150 || checkedMonster.usedColor != MonsterAppearance().usedColor
+        || checkedMonster.shortRingColor != MonsterAppearance().shortRingColor || checkedMonster.weekRingColor != MonsterAppearance().weekRingColor {
+        failures.append("Monster 外观配置校验")
+    }
     func expect(_ actual: String, _ expected: String, _ label: String) {
         if actual != expected { failures.append("\(label)：得到「\(actual)」，期望「\(expected)」") }
     }
@@ -106,6 +149,9 @@ func verify() throws {
     func checkMenu(_ menu: NSMenu, _ label: String,
                    enabledTitles: [String], disabledTitles: [String]) {
         if menu.autoenablesItems { failures.append("\(label)：autoenablesItems 必须为 false") }
+        if menu.items.contains(where: { $0.title.contains("退出") }) {
+            failures.append("\(label)：Dock 自定义菜单不应重复系统退出项")
+        }
         let enabled = Set(menu.items.filter(\.isEnabled).map(\.title))
         let disabled = Set(menu.items.filter { !$0.isEnabled && !$0.isSeparatorItem }.map(\.title))
         for want in enabledTitles where !enabled.contains(want) {
@@ -126,15 +172,27 @@ func verify() throws {
                                         loading: false, errorText: nil, cpu: 0.42, gpu: 0.30, memory: 0.61,
                                         now: menuNow),
               "正常状态",
-              enabledTitles: ["立即刷新额度", "打开详情", "退出 Monster Pulse"],
+              enabledTitles: ["立即刷新额度", "打开主窗口", "设置…", "显示模式", "播放角色律动"],
               disabledTitles: ["5 小时窗口　剩余 92%", "CPU　42%", "GPU　30%", "内存　61%"])
+    for mode in [false,true] { for motion in [false,true] {
+        let menu = AppDelegate.buildDockMenu(target:menuTarget,quota:demoQuota,stale:false,loading:false,errorText:nil,
+            cpu:0.8,gpu:0.9,memory:0.5,monsterEnabled:mode,monsterMotion:motion,now:menuNow)
+        let items = menu.item(withTitle:"显示模式")?.submenu?.items ?? []
+        if items.count != 2 || items.filter({ $0.state == .on }).count != 1
+            || items.first(where:{ $0.title == (mode ? "Monster" : "仪表") })?.state != .on
+            || menu.item(withTitle:"播放角色律动")?.state != (motion ? .on : .off)
+            || items.contains(where: { $0.target == nil || $0.action == nil }) {
+            failures.append("Dock 模式与律动菜单勾选、互斥或 action")
+        }
+    } }
+    if !Config.default.monster.motion || Config.default.monster.enabled { failures.append("启动默认仪表、默认律动开启") }
     // 查询进行中必须禁用刷新：对应 refresh() 的 !loading 守卫，
     // 避免用户连点叠加查询
     checkMenu(AppDelegate.buildDockMenu(target: menuTarget, quota: demoQuota, stale: false,
                                         loading: true, errorText: nil, cpu: 0.42, gpu: 0.30, memory: 0.61,
                                         now: menuNow),
               "加载中",
-              enabledTitles: ["打开详情", "退出 Monster Pulse"],
+              enabledTitles: ["打开主窗口", "设置…"],
               disabledTitles: ["正在查询…"])
     // 无数据时不能出现「旧数据，仅供参考」——没有快照就说旧数据不成立
     let noDataTitles = AppDelegate.buildDockMenu(target: menuTarget, quota: nil, stale: true,
@@ -151,6 +209,19 @@ func verify() throws {
     let defaults = UserDefaults(suiteName: domain)!
     Config.registerDefaults(defaults: defaults)
     defer { defaults.removePersistentDomain(forName: domain) }
+    var savedMonster = MonsterAppearance(); savedMonster.enabled = true; savedMonster.groundOnColor = "#123456"
+    savedMonster.shortRingColor = "#6dc9f4"; savedMonster.weekRingColor = "#eab96b"
+    defaults.set(try! JSONEncoder().encode(savedMonster), forKey: "monsterAppearance")
+    if Config.load(defaults: defaults).monster != savedMonster { failures.append("Monster 配置重启恢复") }
+    var legacy = try JSONSerialization.jsonObject(with:JSONEncoder().encode(savedMonster)) as! [String:Any]
+    legacy.removeValue(forKey:"shortRingColor"); legacy.removeValue(forKey:"weekRingColor")
+    defaults.set(try JSONSerialization.data(withJSONObject:legacy),forKey:"monsterAppearance")
+    var expectedLegacy = savedMonster
+    expectedLegacy.shortRingColor = MonsterAppearance().shortRingColor; expectedLegacy.weekRingColor = MonsterAppearance().weekRingColor
+    if Config.load(defaults:defaults).monster != expectedLegacy { failures.append("Monster 旧版配置保留并补齐环色") }
+    defaults.set(Data("invalid".utf8), forKey: "monsterAppearance")
+    if Config.load(defaults: defaults).monster != MonsterAppearance() { failures.append("Monster 损坏配置回退") }
+    defaults.removeObject(forKey: "monsterAppearance")
     func withConfigDomain<T>(_ body: () -> T) -> T {
         defaults.removePersistentDomain(forName: domain)
         // register 的注册域挂在 app 域上，这里直接改写同一批 key
@@ -173,6 +244,26 @@ func verify() throws {
         let kept = Config.load(defaults: defaults)
         if kept.systemInterval != 7.0 || kept.quotaInterval != 45.0 {
             failures.append("Config.load 未保留合法值，得到 \(kept.systemInterval)/\(kept.quotaInterval)")
+        }
+        for key in ["showCPU", "showGPU", "showMemory", "showDisk"] {
+            defaults.set(false, forKey: key)
+        }
+        let hidden = Config.load(defaults: defaults)
+        if hidden.showCPU || hidden.showGPU || hidden.showMemory || hidden.showDisk {
+            failures.append("四项显示开关必须保留关闭值")
+        }
+        defaults.set(true, forKey: "showDisk")
+        let diskOnly = Config.load(defaults: defaults)
+        if !diskOnly.showDisk || diskOnly.showMemory || diskOnly.showCPU || diskOnly.showGPU {
+            failures.append("磁盘开关必须独立于其他三项")
+        }
+        for key in ["showCPU", "showGPU", "showMemory", "showDisk"] { defaults.removeObject(forKey: key) }
+        if SystemFormat.dockDiskFraction(nil) != nil || SystemFormat.dockDiskFraction(-1) != nil
+            || SystemFormat.dockDiskFraction(.nan) != nil
+            || SystemFormat.dockDiskFraction(0) != 0
+            || SystemFormat.dockDiskFraction(400 * 1_048_576) != 0.5
+            || SystemFormat.dockDiskFraction(1600 * 1_048_576) != 1 {
+            failures.append("Dock 磁盘量程必须区分不可用、零、半格与超量程")
         }
         // 容差应随间隔缩放，且不低于 1 秒
         if kept.systemTolerance < 1 { failures.append("systemTolerance 不得小于 1 秒") }
@@ -224,7 +315,7 @@ func verify() throws {
                                                failureStreak: 3, diskReadMBs: nil, config: alertConfig, now: alertNow)),
                  ["query-failed"], "连续失败 3 次应触发")
     // 关闭预警后一律不触发
-    var muted = Config.default; muted.setAlertsEnabled(false)
+    var muted = Config.default; muted.alertsEnabled = false
     expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 1, resetIn: 60),
                                                failureStreak: 99, diskReadMBs: nil, config: muted, now: alertNow)),
                  [], "关闭预警后不应有任何预警")
@@ -454,6 +545,11 @@ if CommandLine.arguments.contains("--draw-bench") {
     timeIt("回到同值(缓存命中)", 2000)
     view.stale = true    // 触发 backdrop 重建
     timeIt("stale 切换(重建背景)", 2000)
+    view.monsterEnabled = true
+    view.monster.style.enabled = true; view.monster.hero = true
+    view.monster.remaining = 70; view.monster.weekRemaining = 68
+    view.monster.cpu = 0.8; view.monster.gpu = 0.95; view.monster.proxyEnabled = true
+    timeIt("Monster 静态轮廓", 2000)
     print("\n注：上表不含 dock tile 合成到屏幕的开销，那部分由 WindowServer 承担，")
     print("    无法从进程内测得，实际帧率预算应在此基础上留余量。")
     exit(0)
@@ -468,6 +564,9 @@ if CommandLine.arguments.contains("--render-test") {
     // 「没有数字时不该标 OLD」这条分支
     view.remaining = args.count > 1 ? (args[1] == "nil" ? nil : Int(args[1])) : 92
     view.cpu = args.count > 2 ? Double(args[2]) : 0.42
+    view.memory = 0.61
+    view.diskRead = SystemFormat.dockDiskFraction(240 * 1_048_576)
+    view.diskWrite = SystemFormat.dockDiskFraction(80 * 1_048_576)
     // 第 4 位两代语法：旧的是 memory（数字），新的是 stale/none。识别到数字就
     // 按旧语法跳位——旧脚本不至于全坏，新脚本用新位置。
     let fourth = args.count > 3 ? args[3] : "none"
@@ -499,6 +598,10 @@ if CommandLine.arguments.contains("--render-test") {
             view.resetLabel = NetworkStatus.resetLabel(now.addingTimeInterval(seconds), now: now)
             continue
         }
+        if key == "nomemory" { view.memory = nil; continue }
+        if key == "nodisk" { view.diskRead = nil; view.diskWrite = nil; continue }
+        if key == "nomemorymeter" { view.showMemory = false; continue }
+        if key == "nodiskmeter" { view.showDisk = false; continue }
         if key == "nogpu" { view.gpu = nil; continue }
         if key == "nogpumeter" { view.showGPU = false; continue }
         if key == "rail" || key == "rail2" {
@@ -516,18 +619,99 @@ if CommandLine.arguments.contains("--render-test") {
         }
         guard parts.count == 2, let value = Double(parts[1]) else { continue }
         if key == "gpu" { view.gpu = value }
+        if key == "memory" { view.memory = value }
+        if key == "read" { view.diskRead = SystemFormat.dockDiskFraction(value * 1_048_576) }
+        if key == "write" { view.diskWrite = SystemFormat.dockDiskFraction(value * 1_048_576) }
     }
     let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
     // Exercise changing the switches on an existing view, including cached tracks.
+    let desiredMemory = view.showMemory, desiredDisk = view.showDisk
+    view.showMemory.toggle(); view.showDisk.toggle()
     let desiredCPU = view.showCPU, desiredGPU = view.showGPU
     view.showCPU = !desiredCPU; view.showGPU = !desiredGPU
     let warmup = view.bitmapImageRepForCachingDisplay(in: view.bounds)!
     view.cacheDisplay(in: view.bounds, to: warmup)
+    view.showMemory = desiredMemory; view.showDisk = desiredDisk
     view.showCPU = desiredCPU; view.showGPU = desiredGPU
     view.cacheDisplay(in: view.bounds, to: bitmap)
     try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: out))
     print("wrote \(out) remaining=\(view.remaining ?? -1) cpu=\(view.cpu ?? -1) gpu=\(view.gpu ?? -1) stale=\(view.stale) rails=\(view.rails.count)")
     exit(0)
+}
+if CommandLine.arguments.contains("--monster-render-test") || CommandLine.arguments.contains("--monster-window-render-test") || CommandLine.arguments.contains("--monster-settings-render-test") {
+    let args = Array(CommandLine.arguments.dropFirst(2))
+    let out = args.first ?? "/tmp/monster.png", fixtureState = args.count > 1 ? args[1] : "normal"
+    let state = fixtureState.replacingOccurrences(of:"-small",with:"")
+    let fixtureSize: CGFloat = fixtureState.hasSuffix("-small") ? 43 : 128
+    var appearance = MonsterAppearance(); appearance.enabled = true; appearance.motion = false
+    if state == "large" { appearance.size = 110; appearance.intensity = 150 }
+    if state == "custom" { appearance.remainingColor = "#a4ddc6"; appearance.usedColor = "#624c79"; appearance.groundOnColor = "#425b70"; appearance.shortRingColor = "#6dc9f4"; appearance.weekRingColor = "#eab96b" }
+    let scene = MonsterView(frame: NSRect(x:0,y:0,width:fixtureSize,height:fixtureSize))
+    scene.style = appearance
+    scene.remaining = state == "unknown" ? nil : (Int(state) ?? 70)
+    scene.weekRemaining = state == "unknown" ? nil : (Int(state) ?? 68)
+    scene.cpu = state == "cpu" || state == "large" ? 1 : (state == "gpu" ? 0 : 0.8)
+    scene.gpu = state == "gpu" || state == "large" ? 1 : (state == "cpu" ? 0 : 0.95)
+    scene.proxyEnabled = state == "off" ? false : (state == "unknown" ? nil : true)
+    scene.stale = state == "stale"
+    let fixtureNow = Date(timeIntervalSince1970:1_700_000_000)
+    func fixtureTime(minutes: Int, fraction: Double?) -> MonsterTimeWindow {
+        MonsterTimeWindow(window:QuotaWindow(used:30,minutes:minutes,
+            resetsAt:fraction.map { fixtureNow.addingTimeInterval(Double(minutes)*60*(1-$0)) }),now:fixtureNow)
+    }
+    let shortFraction: Double? = state == "unknown" || state == "time-unknown" ? nil :
+        (state == "time-zero" || state == "time-week" ? 0 : (state == "time-full" || state == "time-expired" || state == "time-short" ? 1 : 0.4))
+    let weekFraction: Double? = state == "unknown" || state == "time-unknown" ? nil :
+        (state == "time-zero" || state == "time-short" ? 0 : (state == "time-full" || state == "time-expired" || state == "time-week" ? 1 : 0.28))
+    scene.shortTime = fixtureTime(minutes:300,fraction:shortFraction)
+    scene.weekTime = fixtureTime(minutes:10080,fraction:weekFraction)
+    let dockFixture = DockView(frame:scene.frame)
+    dockFixture.monsterEnabled = true
+    let dockScene = dockFixture.monster
+    dockScene.style = appearance; dockScene.hero = true; dockScene.reduceMotionOverride = false
+    dockScene.remaining = scene.remaining; dockScene.weekRemaining = scene.weekRemaining
+    dockScene.cpu = scene.cpu; dockScene.gpu = scene.gpu; dockScene.proxyEnabled = scene.proxyEnabled; dockScene.stale = scene.stale
+    dockScene.shortTime = scene.shortTime; dockScene.weekTime = scene.weekTime
+    if state.hasPrefix("motion-") { dockScene.style.motion = true; dockScene.phase = state == "motion-a" ? 0.4 : 0.9 }
+    if state == "hidden-cpu" { dockScene.cpu = nil; dockScene.gpu = 0 }
+    if state == "hidden-gpu" { dockScene.gpu = nil; dockScene.cpu = 0 }
+    if state == "idle" { dockScene.cpu = 0; dockScene.gpu = 0 }
+    var view: NSView = dockFixture
+    var owner: AnyObject?
+    if CommandLine.arguments.contains("--monster-settings-render-test") {
+        var settingsAppearance = appearance; settingsAppearance.motion = true
+        let controller = MonsterSettingsController(appearance: settingsAppearance) { _ in }
+        view = controller.window.contentView!; owner = controller
+    } else if CommandLine.arguments.contains("--monster-window-render-test") {
+        let delegate = AppDelegate()
+        delegate.config.monster = appearance
+        delegate.window = NSWindow(contentRect:NSRect(x:0,y:0,width:460,height:400),styleMask:[.titled,.closable],backing:.buffered,defer:false)
+        let content = delegate.window.contentView!
+        content.addSubview(delegate.details); content.addSubview(delegate.monster); content.addSubview(delegate.monsterReading); content.addSubview(delegate.monsterTimeReading)
+        delegate.modeControl = AppDelegate.addModeControl(to:content,target:nil)
+        delegate.modeControl.selectedSegment = 1
+        AppDelegate.addDetailsButtons(to:content,target:nil)
+        delegate.monster.style = appearance; delegate.monster.remaining = scene.remaining
+        delegate.monster.weekRemaining = scene.weekRemaining; delegate.monster.cpu = scene.cpu; delegate.monster.gpu = scene.gpu
+        delegate.monster.proxyEnabled = scene.proxyEnabled; delegate.monster.stale = scene.stale
+        delegate.monster.shortTime = scene.shortTime; delegate.monster.weekTime = scene.weekTime
+        delegate.monsterTimeReading.font = .systemFont(ofSize:12); delegate.monsterTimeReading.alignment = .center
+        delegate.monsterTimeReading.textColor = .secondaryLabelColor
+        delegate.monsterTimeReading.stringValue = scene.shortTime.text(title:"5h 外圈",now:fixtureNow)+"\n"+scene.weekTime.text(title:"周 内圈",now:fixtureNow)
+        delegate.monsterReading.font = .systemFont(ofSize:12); delegate.monsterReading.alignment = .center
+        delegate.monsterReading.stringValue = MonsterSummary.text(remaining:scene.remaining,week:scene.weekRemaining,
+            cpu:scene.cpu,gpu:scene.gpu,proxy:scene.proxyEnabled,stale:scene.stale)
+        delegate.fitWindow(); view = content; owner = delegate
+        print("layout: Monster 内容高 \(Int(delegate.window.contentLayoutRect.height))pt")
+    }
+    view.appearance = renderAppearance; view.wantsLayer = true
+    renderAppearance.performAsCurrentDrawingAppearance { view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor }
+    view.layoutSubtreeIfNeeded()
+    let bitmap = view.bitmapImageRepForCachingDisplay(in:view.bounds)!
+    view.cacheDisplay(in:view.bounds,to:bitmap)
+    try! bitmap.representation(using:.png,properties:[:])!.write(to:URL(fileURLWithPath:out))
+    withExtendedLifetime(owner) {}
+    print("wrote \(out) state=\(state)"); exit(0)
 }
 if CommandLine.arguments.contains("--settings-render-test") {
     // 把设置窗口离屏渲染成 PNG。与 --details-render-test 同一手法。
@@ -543,7 +727,7 @@ if CommandLine.arguments.contains("--settings-render-test") {
     let config: Config
     switch state {
     case "nometers":   config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
-                                      showCPU: false, showMemory: false, showGPU: base.showGPU, alertsEnabled: base.alertsEnabled,
+                                      showCPU: false, showMemory: false, showGPU: false, showDisk: false, alertsEnabled: base.alertsEnabled,
                                       alertQuotaThreshold: base.alertQuotaThreshold,
                                       alertResetLeadMinutes: base.alertResetLeadMinutes,
                                       alertFailureStreak: base.alertFailureStreak,
@@ -622,14 +806,15 @@ if CommandLine.arguments.contains("--dock-menu-dump") {
     }
     defer { _ = target }
     print("state=\(state)")
-    for item in menu.items {
-        let title = item.isSeparatorItem ? "--" : item.title
-        // 把 action 选择器一并打出来，人工点验时能对照「这一项该触发什么」，
-        // 而不是只能看标题对不对。Dock 菜单的 target/action 不由系统分发，
-        // 实际会走到哪个方法是这次点验最需要确认的东西。
-        let action = item.action.map { NSStringFromSelector($0) } ?? "-"
-        print("\(item.isEnabled ? "enabled" : "disabled")\t\(title)\t\(action)")
+    func dump(_ menu: NSMenu, indent: String = "") {
+        for item in menu.items {
+            let title = item.isSeparatorItem ? "--" : item.title
+            let action = item.action.map { NSStringFromSelector($0) } ?? "-"
+            print("\(item.isEnabled ? "enabled" : "disabled")\t\(indent)\(title)\t\(action)\tchecked=\(item.state == .on)")
+            if let submenu = item.submenu { dump(submenu,indent:indent+"  ") }
+        }
     }
+    dump(menu)
     exit(0)
 }
 if CommandLine.arguments.contains("--details-render-test") {
@@ -707,7 +892,7 @@ if CommandLine.arguments.contains("--details-render-test") {
     }
 
     let content = details.preferredHeight
-    let total = NSSize(width: width, height: content + inset * 2 + bottomBar)
+    let total = NSSize(width: width, height: content + inset * 2 + bottomBar + 44)
     // 容器模拟真实窗口的 contentView，这样 details 的 frame 与线上一致
     let container = NSView(frame: NSRect(origin: .zero, size: total))
     container.appearance = renderAppearance
@@ -717,6 +902,8 @@ if CommandLine.arguments.contains("--details-render-test") {
         container.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
     }
     details.appearance = renderAppearance
+    AppDelegate.addModeControl(to: container, target: nil)
+    AppDelegate.addDetailsButtons(to: container, target: nil)
     container.addSubview(details)
     details.frame = NSRect(x: inset, y: bottomBar, width: width - inset * 2, height: content)
     container.layoutSubtreeIfNeeded()
@@ -738,6 +925,8 @@ if CommandLine.arguments.contains("--probe") {
 }
 
 final class DockView: NSView {
+    let monster = MonsterView()
+    var monsterEnabled = false
     var remaining: Int?
     /// 一条额度轨。两条轨（5 小时窗口 / 周窗口）用同一套画法，语义统一。
     struct Rail {
@@ -750,7 +939,12 @@ final class DockView: NSView {
     /// GPU 占用（0...1）。跑本地大模型时这是判断「机器在不在算」的唯一指标，
     /// 所以进了 Dock 图标而不是只留在详情窗口。
     var gpu: Double?
+    var memory: Double?
+    var diskRead: Double?
+    var diskWrite: Double?
     var stale = false
+    var showMemory = true
+    var showDisk = true
     var showCPU = true
     var showGPU = true
     /// 额度轨：[0] = 5 小时主窗口，[1] = 周窗口。缺失的窗口不画。
@@ -799,12 +993,25 @@ final class DockView: NSView {
         image.draw(in: rect)
     }
 
-    /// 128pt 画布缩到 43pt：左侧额度数字，右侧 CPU / GPU 固定竖柱。
-    /// 两根柱约 5pt 宽、23pt 高；填充始终由下向上，关掉一项不挪另一项。
-    static let meterSlots = 2
-    static func meterRect(slot: Int) -> NSRect {
-        NSRect(x: 80 + CGFloat(slot) * 24, y: 38, width: 13.5, height: 60)
+    /// 四项为 2×2；三项时同列的剩余项拉满，两项为双长柱，一项占满区域。
+    static let meterSlots = 4
+    private func meterRect(slot: Int) -> NSRect? {
+        let active = meterVisibility.indices.filter { meterVisibility[$0] }
+        guard let index = active.firstIndex(of: slot) else { return nil }
+        if active.count == 1 {
+            return NSRect(x: 80, y: 38, width: 37.5, height: 60)
+        }
+        if active.count == 2 {
+            return NSRect(x: 80 + CGFloat(index) * 24, y: 38, width: 13.5, height: 60)
+        }
+        let column = slot % 2
+        let alone = active.filter { $0 % 2 == column }.count == 1
+        return NSRect(x: 80 + CGFloat(column) * 24,
+                      y: alone || slot >= 2 ? 38 : 72,
+                      width: 13.5, height: alone ? 60 : 26)
     }
+    private var meterVisibility: [Bool] { [showCPU, showGPU, showMemory, showDisk] }
+    private var meterSignature: String { meterVisibility.map { $0 ? "1" : "0" }.joined() }
 
     /// 底部独立的额度区：上轨 5h、下轨周额度，填充为已用比例。
     static let railWidth: CGFloat = 98
@@ -841,8 +1048,8 @@ final class DockView: NSView {
                 NSBezierPath(roundedRect: rail, xRadius: 1.5, yRadius: 1.5).fill()
             }
             NSColor.darkGray.setFill()
-            for slot in 0..<DockView.meterSlots where slot == 0 ? self.showCPU : self.showGPU {
-                let bar = DockView.meterRect(slot: slot)
+            for slot in 0..<DockView.meterSlots where self.meterVisibility[slot] {
+                guard let bar = self.meterRect(slot: slot) else { continue }
                 NSBezierPath(roundedRect: bar, xRadius: 3, yRadius: 3).fill()
             }
             return true
@@ -850,13 +1057,14 @@ final class DockView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        if monsterEnabled { monster.drawScene(in: bounds); return }
         if backdrop == nil || backdropStale != stale || backdropSize != bounds.size
-            || backdropRails != rails.count || backdropMeters != "\(showCPU):\(showGPU)" {
+            || backdropRails != rails.count || backdropMeters != meterSignature {
             backdrop = makeBackdrop()
             backdropStale = stale
             backdropSize = bounds.size
             backdropRails = rails.count
-            backdropMeters = "\(showCPU):\(showGPU)"
+            backdropMeters = meterSignature
         }
         backdrop?.draw(in: bounds)
 
@@ -905,16 +1113,30 @@ final class DockView: NSView {
         let meters: [(value: Double?, shown: Bool, slot: Int, color: NSColor)] = [
             (cpu, showCPU, 0, .systemTeal),
             (gpu, showGPU, 1, .systemGreen),
+            (memory, showMemory, 2, .systemPurple),
         ]
         for meter in meters {
             guard meter.shown else { continue }
-            let rect = Self.meterRect(slot: meter.slot)
+            guard let rect = meterRect(slot: meter.slot) else { continue }
             guard let value = meter.value else { drawUnavailable(in: rect); continue }
             meter.color.setFill()
             let fillHeight = rect.height * min(1, max(0, value))
             guard fillHeight > 0 else { continue }
             NSBezierPath(roundedRect: NSRect(x: rect.minX, y: rect.minY,
                 width: rect.width, height: fillHeight), xRadius: 3, yRadius: 3).fill()
+        }
+
+        if let rect = meterRect(slot: 3) {
+            for (index, value) in [diskRead, diskWrite].enumerated() {
+                let half = NSRect(x: rect.minX + CGFloat(index) * (rect.width + 1.5) / 2,
+                                  y: rect.minY, width: (rect.width - 1.5) / 2, height: rect.height)
+                guard let value else { drawUnavailable(in: half); continue }
+                let height = rect.height * min(1, max(0, value))
+                guard height > 0 else { continue }
+                (index == 0 ? NSColor.systemOrange : NSColor.systemYellow).setFill()
+                NSBezierPath(roundedRect: NSRect(x: half.minX, y: half.minY,
+                    width: half.width, height: height), xRadius: 1.5, yRadius: 1.5).fill()
+            }
         }
 
         // 额度轨（5 小时 + 周）。画法是标准 bullet graph：
@@ -960,6 +1182,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var observers: [NSObjectProtocol] = []
     var window: NSWindow!
     let details = DetailsView()
+    let monster = MonsterView()
+    let monsterReading = NSTextField(wrappingLabelWithString: "")
+    let monsterTimeReading = NSTextField(wrappingLabelWithString: "")
+    var modeControl: NSSegmentedControl!
+    var animationTimer: Timer?
     var config = Config.default
     var settings: SettingsWindowController!
     /// 最近一次系统采样。详情窗口的内存与磁盘区从这里取数。
@@ -980,6 +1207,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 注册域是易失的，每次启动都要重注册，再叠加用户已存的持久值
         Config.registerDefaults()
         config = Config.load()
+        // Startup always enters the instrument page; appearance and motion preferences are retained.
+        config.monster.enabled = false
         // 诊断通道：仅在 MP_SAMPLE_LOG 指定时逐次采样落盘
         openSampleLog()
         // 启动即写一条：既确认诊断通道真的通了，也在分析时给出「进程从何时开始存在」
@@ -994,20 +1223,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         submenu.addItem(.separator())
         submenu.addItem(withTitle: "退出 Monster Pulse", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = submenu; menu.addItem(appItem); NSApp.mainMenu = menu
+        dock.monster.hero = true
         NSApp.dockTile.contentView = dock
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 400),
             styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
         // 内容高度由 fitWindow 按实际内容算出，这里的初值只影响首帧闪现
         window.title = "Monster Pulse"; window.isReleasedWhenClosed = false
         window.contentView?.addSubview(details)
-        let button = NSButton(title: "刷新额度", target: self, action: #selector(refresh))
-        button.frame = NSRect(x: 22, y: 14, width: 110, height: 32)
-        window.contentView?.addSubview(button)
+        window.contentView?.addSubview(monster)
+        monsterReading.alignment = .center
+        monsterReading.font = .systemFont(ofSize: 12)
+        window.contentView?.addSubview(monsterReading)
+        monsterTimeReading.alignment = .center; monsterTimeReading.font = .systemFont(ofSize:12)
+        monsterTimeReading.textColor = .secondaryLabelColor
+        window.contentView?.addSubview(monsterTimeReading)
+        modeControl = Self.addModeControl(to: window.contentView!, target: self)
+        modeControl.selectedSegment = config.monster.enabled ? 1 : 0
+        if let content = window.contentView { Self.addDetailsButtons(to: content, target: self) }
         let center = NSWorkspace.shared.notificationCenter
         observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             self.log("willSleep 触发：停表 \(self.timers.count) 个、取消在途查询 \(self.queue.operationCount) 个")
             self.network.stop()
+            self.animationTimer?.invalidate(); self.animationTimer = nil
             self.sleeping = true; self.timers.forEach { $0.invalidate() }; self.queue.cancelAllOperations()
         })
         observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
@@ -1030,7 +1268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self.sleeping = false; self.sampler.reset(); self.startTimers(); self.tick(); self.refresh()
         })
-        startTimers(); tick(); refresh()
+        startTimers(); render(); tick(); refresh()
         window.center(); window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -1046,9 +1284,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 配置变更后的统一处理：重启定时器让新间隔立即生效，
     /// 并刷新展示（CPU/GPU 可能被隐藏）。
-    func configChanged() {
-        startTimers()
-        network.poll(proxy: config.effectiveProxy) { [weak self] in self?.render() }
+    func configChanged(previous: Config) {
+        settings?.updateConfig(config)
+        if previous.systemInterval != config.systemInterval || previous.quotaInterval != config.quotaInterval { startTimers() }
+        if previous.proxyURL != config.proxyURL { network.poll(proxy: config.effectiveProxy) { [weak self] in self?.render() } }
         render()
         evaluateAlerts(afterConfigChange: true)
     }
@@ -1184,8 +1423,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 窗口本身常驻内存没意义——不进这个分支就一个控件都不创建。
         if settings == nil {
             settings = SettingsWindowController(config: config) { [weak self] updated in
-                self?.config = updated
-                self?.configChanged()
+                guard let self else { return }
+                let previous = self.config
+                self.config = updated
+                self.configChanged(previous: previous)
             }
         }
         settings.show()
@@ -1213,10 +1454,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         queue.addOperation(operation)
     }
+    @objc func changeMode(_ sender: NSSegmentedControl) {
+        var appearance = config.monster
+        appearance.enabled = sender.selectedSegment == 1
+        setMonsterMode(appearance.enabled)
+    }
+    func setMonsterMode(_ enabled: Bool) {
+        var appearance = config.monster; appearance.enabled = enabled
+        config.setMonster(appearance)
+        settings?.updateConfig(config)
+        render()
+    }
+    @objc func selectInstrumentMode() { setMonsterMode(false) }
+    @objc func selectMonsterMode() { setMonsterMode(true) }
+    @objc func toggleMonsterMotion() {
+        var appearance = config.monster; appearance.motion.toggle()
+        config.setMonster(appearance); settings?.updateConfig(config); render()
+    }
+    @discardableResult
+    static func addModeControl(to content: NSView, target: AnyObject?) -> NSSegmentedControl {
+        let control = NSSegmentedControl(labels: ["仪表", "Monster"], trackingMode: .selectOne,
+                                         target: target, action: #selector(AppDelegate.changeMode(_:)))
+        control.selectedSegment = 0
+        control.frame = NSRect(x: (content.bounds.width-200)/2, y: content.bounds.height-40, width: 200, height: 28)
+        content.addSubview(control)
+        return control
+    }
+    func updateAnimation() {
+        let active = config.monster.enabled && config.monster.motion && config.monster.intensity > 0
+            && !sleeping && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            && ((config.showCPU && (dock.cpu ?? 0) > 0.01) || (config.showGPU && (dock.gpu ?? 0) > 0.01))
+        if !active { animationTimer?.invalidate(); animationTimer = nil; return }
+        guard animationTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let phase = ProcessInfo.processInfo.systemUptime
+            self.monster.phase = phase; self.dock.monster.phase = phase
+            if self.window.isVisible && self.window.occlusionState.contains(.visible) { self.monster.needsDisplay = true }
+            NSApp.dockTile.display()
+        }
+        timer.tolerance = 0.015
+        RunLoop.main.add(timer, forMode: .common)
+        animationTimer = timer
+    }
+
+    /// 主窗口与离屏夹具共用底部入口，避免渲染漏掉真实按钮。
+    static func addDetailsButtons(to content: NSView, target: AnyObject?) {
+        let refresh = NSButton(title: "刷新额度", target: target, action: #selector(AppDelegate.refresh))
+        refresh.frame = NSRect(x: 22, y: 14, width: 110, height: 32)
+        content.addSubview(refresh)
+        let settings = NSButton(title: "设置…", target: target, action: #selector(AppDelegate.openSettings))
+        settings.frame = NSRect(x: content.bounds.width - 110, y: 14, width: 88, height: 32)
+        content.addSubview(settings)
+    }
+
     func render() {
+        let now = Date()
+        let shortWindow = quota?.windows.first(where: { $0.minutes == 300 })
+        let weekWindow = quota?.windows.first(where: { $0.minutes == 10080 })
         dock.remaining = quota?.windows.first?.remaining
         dock.country = network.exit?.country
         dock.proxyEnabled = network.probeProxyEnabled
+        dock.monsterEnabled = config.monster.enabled
+        modeControl?.selectedSegment = config.monster.enabled ? 1 : 0
+        for scene in [monster, dock.monster] {
+            scene.style = config.monster
+            scene.remaining = shortWindow?.remaining
+            scene.weekRemaining = weekWindow?.remaining
+            scene.shortTime = MonsterTimeWindow(window:shortWindow,now:now)
+            scene.weekTime = MonsterTimeWindow(window:weekWindow,now:now)
+            scene.cpu = config.showCPU ? dock.cpu : nil
+            scene.gpu = config.showGPU ? dock.gpu : nil
+            scene.proxyEnabled = network.proxyEnabled
+        }
+        monster.needsDisplay = true
         dock.resetLabel = NetworkStatus.resetLabel(quota?.windows.first?.resetsAt)
         // stale 的含义是「有快照但已过期」，所以必须先有数据。
         // 之前只要有 errorText 就是 stale，首次查询失败（根本没有快照）也会
@@ -1225,14 +1536,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hasData = quota != nil
         dock.stale = hasData && (errorText != nil
                                   || (updated.map { Date().timeIntervalSince($0) > 300 } ?? false))
+        monster.stale = dock.stale; dock.monster.stale = dock.stale
+        monsterReading.stringValue = MonsterSummary.text(remaining:monster.remaining,week:monster.weekRemaining,
+            cpu:dock.cpu,gpu:dock.gpu,showCPU:config.showCPU,showGPU:config.showGPU,proxy:network.proxyEnabled,stale:dock.stale)
+        monsterTimeReading.stringValue = monster.shortTime.text(title:"5h 外圈",now:now)+"\n"+monster.weekTime.text(title:"周 内圈",now:now)
+        updateAnimation()
         dock.showCPU = config.showCPU
         dock.showGPU = config.showGPU
+        dock.showMemory = config.showMemory
+        dock.showDisk = config.showDisk
+        dock.memory = system.memoryFraction
+        dock.diskRead = SystemFormat.dockDiskFraction(system.diskReadBytesPerSecond)
+        dock.diskWrite = SystemFormat.dockDiskFraction(system.diskWriteBytesPerSecond)
         // 开关必须计入状态串：否则用户关掉 CPU 后图标内容变了却不会重绘
         let railsSignature = dock.rails.map { String(format: "%.3f/%.3f", $0.used, $0.elapsed ?? -1) }
             .joined(separator: ",")
-        let dockState = "\(dock.remaining ?? -1):\(dock.stale):\(config.showCPU):\(config.showGPU):"
-            + "\(Int((dock.cpu ?? -1) * 100)):\(Int((dock.gpu ?? -1) * 100)):\(railsSignature):\(dock.country ?? "?"):\(String(describing: dock.proxyEnabled)):\(dock.resetLabel ?? "-")"
-        if dockState != lastDockState { NSApp.dockTile.display(); lastDockState = dockState }
+        let dockState = "\(dock.remaining ?? -1):\(dock.stale):\(config.showCPU):\(config.showGPU):\(config.showMemory):\(config.showDisk):"
+            + "\(Int((dock.cpu ?? -1) * 100)):\(Int((dock.gpu ?? -1) * 100)):\(Int((dock.memory ?? -1) * 100)):\(Int((dock.diskRead ?? -1) * 100)):\(Int((dock.diskWrite ?? -1) * 100)):\(railsSignature):\(dock.country ?? "?"):\(String(describing: dock.proxyEnabled)):\(dock.resetLabel ?? "-")"
+        if config.monster.enabled || dockState != lastDockState { NSApp.dockTile.display(); lastDockState = dockState }
         details.update(
             windows: (quota?.windows ?? []).map { value in
                 (title: QuotaFormat.windowTitle(minutes: value.minutes),
@@ -1243,7 +1564,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             quotaAvailable: quota != nil,
             cpu: config.showCPU ? dock.cpu : nil,
             reading: system,
-            showCPU: config.showCPU, showMemory: config.showMemory, showGPU: config.showGPU,
+            showCPU: config.showCPU, showMemory: config.showMemory, showGPU: config.showGPU, showDisk: config.showDisk,
             updated: updated, loading: loading, errorText: errorText, stale: dock.stale)
         fitWindow()
     }
@@ -1253,10 +1574,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let width: CGFloat = 460
         let inset: CGFloat = 22
         let bottomBar: CGFloat = 56
-        let content = details.preferredHeight
+        let showMonster = config.monster.enabled
+        details.isHidden = showMonster; monster.isHidden = !showMonster; monsterReading.isHidden = !showMonster
+        monsterTimeReading.isHidden = !showMonster
+        let content = showMonster ? CGFloat(378) : details.preferredHeight
         details.frame = NSRect(x: inset, y: bottomBar, width: width - inset * 2, height: content)
-        let target = NSSize(width: width, height: content + inset * 2 + bottomBar)
-        if window.contentView?.frame.size != target { window.setContentSize(target) }
+        let target = NSSize(width: width, height: content + inset * 2 + bottomBar + 44)
+        if window.contentLayoutRect.size != target { window.setContentSize(target) }
+        modeControl?.frame = NSRect(x: (width-200)/2, y: target.height-40, width: 200, height: 28)
+        monster.frame = NSRect(x: (width-260)/2, y: bottomBar+116, width: 260, height: 260)
+        monsterReading.frame = NSRect(x: inset, y: bottomBar+60, width: width-inset*2, height: 42)
+        monsterTimeReading.frame = NSRect(x: inset, y: bottomBar+8, width: width-inset*2, height: 42)
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         window.makeKeyAndOrderFront(nil); return true
@@ -1271,7 +1599,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                            cpu: dock.cpu, gpu: dock.gpu,
                            memory: system.memoryFraction,
                            showCPU: config.showCPU, showGPU: config.showGPU,
-                           showMemory: config.showMemory)
+                           showMemory: config.showMemory, monsterEnabled: config.monster.enabled, monsterMotion: config.monster.motion)
         let proxy = network.proxyEnabled.map { $0 ? "开启" : "关闭" } ?? "未知"
         let name = network.exit.flatMap { Locale(identifier: "zh_CN").localizedString(forRegionCode: $0.country) }
         let country = name ?? "未知"
@@ -1292,6 +1620,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static func buildDockMenu(target: AnyObject, quota: Quota?, stale: Bool, loading: Bool,
                               errorText: String?, cpu: Double?, gpu: Double?, memory: Double?,
                               showCPU: Bool = true, showGPU: Bool = true, showMemory: Bool = true,
+                              monsterEnabled: Bool = false, monsterMotion: Bool = true,
                               now: Date = Date()) -> NSMenu {
         // 两个来自官方文档的硬约束，不照做菜单就不工作：
         // 1. Dock 菜单的 target/action 不由系统代为分发，文档要求选中项后
@@ -1348,10 +1677,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // !loading 守卫，把「不会叠加正在执行的查询」如实暴露给用户
         menu.addItem(action(loading ? "正在查询…" : "立即刷新额度",
                             #selector(AppDelegate.dockMenuRefresh), enabled: !loading))
-        menu.addItem(action("打开详情", #selector(AppDelegate.dockMenuShowDetails)))
+        menu.addItem(action("打开主窗口", #selector(AppDelegate.dockMenuShowDetails)))
         menu.addItem(action("设置…", #selector(AppDelegate.dockMenuSettings)))
         menu.addItem(.separator())
-        menu.addItem(action("退出 Monster Pulse", #selector(AppDelegate.dockMenuQuit)))
+        let modes = NSMenu(); modes.autoenablesItems = false
+        let instrument = action("仪表", #selector(AppDelegate.dockMenuInstrument))
+        instrument.state = monsterEnabled ? .off : .on; modes.addItem(instrument)
+        let monster = action("Monster", #selector(AppDelegate.dockMenuMonster))
+        monster.state = monsterEnabled ? .on : .off; modes.addItem(monster)
+        let modeItem = NSMenuItem(title:"显示模式",action:nil,keyEquivalent:"")
+        modeItem.submenu = modes; modeItem.isEnabled = true; menu.addItem(modeItem)
+        let motion = action("播放角色律动", #selector(AppDelegate.dockMenuToggleMotion))
+        motion.state = monsterMotion ? .on : .off; menu.addItem(motion)
+        // 系统 Dock 菜单自带「退出」，无需再添加重复入口。
         return menu
     }
 
@@ -1367,14 +1705,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
-    @objc private func dockMenuQuit(_ sender: Any?) {
-        NSApp.terminate(nil)
-    }
     @objc private func dockMenuSettings(_ sender: Any?) {
         NSApp.sendAction(#selector(openSettings), to: self, from: nil)
     }
+    @objc private func dockMenuInstrument(_ sender: Any?) {
+        NSApp.sendAction(#selector(selectInstrumentMode), to:self, from:nil)
+    }
+    @objc private func dockMenuMonster(_ sender: Any?) {
+        NSApp.sendAction(#selector(selectMonsterMode), to:self, from:nil)
+    }
+    @objc private func dockMenuToggleMotion(_ sender: Any?) {
+        NSApp.sendAction(#selector(toggleMonsterMotion), to:self, from:nil)
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationWillTerminate(_ notification: Notification) {
+        animationTimer?.invalidate()
         timers.forEach { $0.invalidate() }
         network.stop()
         queue.cancelAllOperations(); queue.waitUntilAllOperationsAreFinished()

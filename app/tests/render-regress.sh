@@ -60,11 +60,20 @@ CASES=(
   "gpu-unavailable:62:0:none:both:nogpu,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
   "cpu-full:62:1:none:both:gpu=0,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
   "gpu-full:62:0:none:both:gpu=1,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
-  "zero-load:62:0:none:both:gpu=0,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
+  "zero-load:62:0:none:both:memory=0,read=0,write=0,gpu=0,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
   "network-off:62:0.12:none:both:gpu=1,rail=0.38/0.45,rail2=0.26/0.32,country=CN,proxy=off,reset=1800"
   "network-unknown:62:0.12:none:both:gpu=1,rail=0.38/0.45,rail2=0.26/0.32,proxy=unknown"
   "quota-empty:0:0:none:both:gpu=0,country=US,proxy=on"
   "quota-full:100:0:none:both:gpu=0,country=US,proxy=on"
+
+  "hide-memory:92:0.42:none:both:nomemorymeter,gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
+  "hide-disk:92:0.42:none:both:nodiskmeter,gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
+  "hide-all:92:0.42:none:no-both:nomemorymeter,nodiskmeter,gpu=0.12,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
+  "memory-full:62:0:none:both:gpu=0,memory=1,read=0,write=0"
+  "disk-read-full:62:0:none:both:gpu=0,memory=0,read=800,write=0"
+  "disk-write-full:62:0:none:both:gpu=0,memory=0,read=0,write=800"
+  "memory-unavailable:62:0:none:both:gpu=0,nomemory,read=0,write=0"
+  "disk-unavailable:62:0:none:both:gpu=0,memory=0,nodisk"
 
 )
 
@@ -95,13 +104,16 @@ SETTINGS_CASES=(
   "settings-login-off"
 )
 
+MONSTER_CASES=(normal 100 70 50 15 0 unknown stale cpu gpu off large custom motion-a motion-b idle hidden-cpu hidden-gpu time-zero time-full time-short time-week time-unknown time-zero-small time-full-small)
 mkdir -p "$BASE"
-if [ "${1:-}" = "--update" ] || [ "${1:-}" = "--update-dock" ]; then
+if [ "${1:-}" = "--update" ] || [ "${1:-}" = "--update-dock" ] || [ "${1:-}" = "--update-ui" ]; then
+  if [ "${1:-}" != "--update-ui" ]; then
   for spec in "${CASES[@]}"; do
     IFS=':' read -r name r c st meters extras <<<"$spec"
     "$APP" --render-test "$BASE/$name.png" "$r" "$c" "$st" "$meters" "$extras" >/dev/null \
       && echo "  基线已更新 $name"
   done
+  fi
   if [ "${1:-}" = "--update-dock" ]; then
     echo "Dock 基准图写入 $BASE"; exit 0
   fi
@@ -113,6 +125,11 @@ if [ "${1:-}" = "--update" ] || [ "${1:-}" = "--update-dock" ]; then
     "$APP" --settings-render-test "$BASE/$state.png" "${state#settings-}" >/dev/null \
       && echo "  基线已更新 $state"
   done
+  for state in "${MONSTER_CASES[@]}"; do
+    "$APP" --monster-render-test "$BASE/monster-$state.png" "$state" >/dev/null
+  done
+  "$APP" --monster-window-render-test "$BASE/monster-window.png" normal >/dev/null
+  "$APP" --monster-settings-render-test "$BASE/monster-settings.png" normal >/dev/null
   echo; echo "基准图写入 $BASE"; exit 0
 fi
 
@@ -171,7 +188,30 @@ for state in "${SETTINGS_CASES[@]}"; do
   compare "$state" "$WORK/$state.png"
 done
 
+echo "Monster 视觉回归"
+for state in "${MONSTER_CASES[@]}"; do
+  "$APP" --monster-render-test "$WORK/monster-$state.png" "$state" >/dev/null
+  compare "monster-$state" "$WORK/monster-$state.png"
+done
+"$APP" --monster-window-render-test "$WORK/monster-window.png" normal >/dev/null
+compare "monster-window" "$WORK/monster-window.png"
+"$APP" --monster-settings-render-test "$WORK/monster-settings.png" normal >/dev/null
+compare "monster-settings" "$WORK/monster-settings.png"
+if python3 tests/monster-render-check.py "$WORK"; then pass=$((pass+1)); else fail=$((fail+1)); fi
+
 echo
+# 穷举四项显示开关，检查 4/3/2/1/0 项的动态布局，不以快照代替布局语义。
+for mask in {0..15}; do
+  meters=both
+  if (( (mask & 3) == 0 )); then meters=no-both
+  elif (( (mask & 1) == 0 )); then meters=no-cpu
+  elif (( (mask & 2) == 0 )); then meters=no-gpu
+  fi
+  extras="gpu=1,memory=1,read=800,write=800"
+  (( mask & 4 )) || extras="$extras,nomemorymeter"
+  (( mask & 8 )) || extras="$extras,nodiskmeter"
+  "$APP" --render-test "$WORK/reflow-$mask.png" 62 1 none "$meters" "$extras" >/dev/null
+done
 if python3 tests/dock-layout-check.py "$WORK"; then
   pass=$((pass+1))
 else

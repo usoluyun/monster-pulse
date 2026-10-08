@@ -15,6 +15,8 @@ Swift + AppKit，零第三方依赖。`app/` 是全部源码，`app/Sources/` �
 | `Alerts.swift` | 预警规则与跃迁去重。纯逻辑，不碰 AppKit |
 | `Config.swift` | 配置读写 + 设置窗口 |
 | `DetailsView.swift` | 详情窗口视图 |
+| `MonsterModel.swift` | 角色轮廓、白色面积映射与外观校验，不 import AppKit |
+| `MonsterView.swift` | 窗口 / Dock 共用的角色绘制与外观面板 |
 | `main.swift` | 应用生命周期、Dock 图标、自检与渲染夹具 |
 
 分层原则：**领域逻辑与预警逻辑必须放在不 import AppKit 的文件里**，这样
@@ -28,7 +30,7 @@ Swift + AppKit，零第三方依赖。`app/` 是全部源码，`app/Sources/` �
 ```sh
 bash app/build.sh                      # Release(-O)，产物在 app/.build/
 app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse --self-test
-bash app/tests/render-regress.sh       # 视觉回归（39 张图 + 2 项语义检查，容差 24）
+bash app/tests/render-regress.sh       # 视觉回归（74 张图 + 3 项语义检查，容差 24）
 bash app/tests/run-abnormal-tests.sh   # 查询失败 10 场景
 bash app/tests/run-termination-tests.sh # 退出路径 2 条
 bash app/tests/run-perf-test.sh        # 性能验收（3 轮，约 75 分钟）
@@ -45,7 +47,10 @@ bash app/tests/run-perf-test.sh        # 性能验收（3 轮，约 75 分钟）
 | `--details-render-test` | 详情窗口离屏渲染：`normal` / `no-data` / `stale` / `error` / `loading` / `*-no-meters` / `no-gpu` |
 | `--settings-render-test` | 设置面板离屏渲染，并输出 `layout:` 诊断（`render-regress.sh` 据此判 FAIL）。状态：`proxy` / `dns` / `nometers` / `alerts-off` / `login-on` / `login-off` / `full` |
 | `--dock-menu-dump` | 打印 Dock 菜单的启用态、标题与 action 选择器，人工点验时的对照依据 |
-| `--draw-bench` | 单帧 draw 成本微基准 |
+| `--monster-render-test` | 原生 Monster Dock：normal / 100 / 70 / 50 / 15 / 0 / unknown / stale / cpu / gpu / off / large / custom / motion-a / motion-b / idle / hidden-cpu / hidden-gpu |
+| `--monster-window-render-test` | Monster 主窗口固定夹具 |
+| `--monster-settings-render-test` | Monster 外观面板固定夹具 |
+| `--draw-bench` | 仪表与 Monster 单帧 draw 成本微基准 |
 
 离屏渲染（改 UI 后**必须实际看图**，不能只看测试通过）：
 
@@ -226,7 +231,7 @@ AGENTS.md、README、验证报告和待办。**这条结论从未实测**——�
   2026-10-07 按用户要求给 Dock 图标加了 GPU 计量条（三根：CPU 青 / GPU 绿 /
   内存紫，间距从 13 收到 10、条高 7→6），但**可读性预算的问题依然没解决**：
   43pt 下三根条只剩色块，能分辨「GPU 满不满」但读不出数值。这次是加信息量，
-  不是重做视觉，Monster 角色形象仍暂缓。
+  不是重做视觉，Monster 角色形象当时仍暂缓；2026-10-08 用户确认第三版后已授权实现，当前实现与验收状态见 docs/monster-view-design.md。
 - 内存压力等级（`kern.memorystatus_vm_pressure_level()`）**公开拿不到**：无 SDK
   header 且符号未导出；`DISPATCH_SOURCE_TYPE_MEMORYPRESSURE` 是公开 API 但只在
   状态变化时通知，不能用于显示。
