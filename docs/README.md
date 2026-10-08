@@ -7,6 +7,7 @@
 ## 设计
 
 - [Monster 视图设计与实现](monster-view-design.md)：原生视图切换、额度填充、太阳、代理地面色与外观配置。
+- [Monster 资源用量记录（2026-10-08）](resource-usage-2026-10-08.md)：当前安装版 Monster 动画的本机资源采样及限制。
 
 - [可行性方案与 PoC 设计](codex-dock-feasibility.md)：产品范围、数据来源、技术实现与性能验收方法。
 

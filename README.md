@@ -114,6 +114,7 @@ bash app/tests/run-termination-tests.sh
 
 - [项目里程碑](docs/roadmap.md)：M1 已完成，M2 原生功能已实现、验收中；M3 / M4 仍仅规划 New API 与 OpenCode Zen / Go 接入。
 - [Monster 设计与使用](docs/monster-view-design.md)
+- [Monster 资源用量记录（2026-10-08）](docs/resource-usage-2026-10-08.md)：单机 Monster 动画 15 分钟 CPU / footprint 采样及其验收限制。
 - [文档入口](docs/README.md)
 - [设计与数据来源](docs/codex-dock-feasibility.md)
 - [构建、打包与测试](docs/poc-usage.md)
