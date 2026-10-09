@@ -28,7 +28,8 @@ jobs:
           APP="app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse"
           DMG="app/.build/MonsterPulse.dmg"
           "$APP" --self-test
-          lipo -verify_arch arm64 x86_64 "$APP"
+          ARCHS="$(lipo "$APP" -archs)"
+          [[ "$ARCHS" == *arm64* && "$ARCHS" == *x86_64* ]]
           hdiutil verify "$DMG"
           (cd app/.build && shasum -a 256 MonsterPulse.dmg > MonsterPulse.dmg.sha256)
 
