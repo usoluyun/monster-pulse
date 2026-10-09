@@ -1,0 +1,61 @@
+name: Build macOS DMG
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    # Use the macOS 15 SDK so the x86_64 slice remains available in the universal app.
+    runs-on: macos-15
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+
+      - name: Build universal app and DMG
+        run: bash app/build.sh --dmg --sign --universal
+
+      - name: Verify app and disk image
+        run: |
+          APP="app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse"
+          DMG="app/.build/MonsterPulse.dmg"
+          "$APP" --self-test
+          lipo -verify_arch arm64 x86_64 "$APP"
+          hdiutil verify "$DMG"
+          (cd app/.build && shasum -a 256 MonsterPulse.dmg > MonsterPulse.dmg.sha256)
+
+      - name: Publish assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          DMG="app/.build/MonsterPulse.dmg"
+          CHECKSUM="app/.build/MonsterPulse.dmg.sha256"
+
+          if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$DMG" "$CHECKSUM" --clobber --repo "$REPOSITORY"
+          else
+            NOTES="$RUNNER_TEMP/release-notes.md"
+            cat > "$NOTES" <<'EOF'
+          ## Install
+
+          Download `MonsterPulse.dmg`, open it, and drag Monster Pulse to Applications.
+          This build is ad-hoc signed and is not notarized. On first launch, use Finder's
+          Open command from the app's context menu to approve Gatekeeper's warning.
+
+          The universal app supports Intel and Apple Silicon Macs running macOS 13 or later.
+          EOF
+            gh release create "$TAG" "$DMG" "$CHECKSUM" \
+              --title "Monster Pulse $TAG" \
+              --notes-file "$NOTES" \
+              --repo "$REPOSITORY"
+          fi

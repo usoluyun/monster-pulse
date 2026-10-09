@@ -31,7 +31,15 @@
 
 需要 **macOS 13+** 和 **Xcode Command Line Tools**。读取额度另需支持 `app-server` 的 Codex CLI，并以 ChatGPT 订阅账户登录；仅使用 API Key 的账户不在项目的目标范围内。
 
-目前没有预编译发行包，直接从源码构建：
+### 从 GitHub Releases 安装
+
+前往 [Releases](https://github.com/usoluyun/monster-pulse/releases/latest)，下载 `MonsterPulse.dmg`，打开磁盘映像并将 Monster Pulse 拖入 Applications。发行包为 macOS 13+ 的 arm64 / x86_64 通用应用；首次启动时，如果 Gatekeeper 提示无法验证开发者，在 Finder 中对应用点右键并选择「打开」，再确认一次。
+
+应用读取 Codex 额度仍需已安装并登录的 Codex CLI。当前发行包使用 ad-hoc 签名，未经过 Apple 公证；要去掉首次打开时的 Gatekeeper 确认，需要配置 Developer ID 签名与公证。
+
+推送 `v*` 格式的版本标签会触发 GitHub Actions，构建并自检通用 DMG，然后把 DMG 和 SHA-256 校验文件发布到对应的 GitHub Release。工作流见 [release-dmg.yml](.github/workflows/release-dmg.yml)。
+
+### 从源码构建
 
 ```sh
 git clone https://github.com/usoluyun/monster-pulse.git

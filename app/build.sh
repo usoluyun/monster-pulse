@@ -6,7 +6,7 @@
 #   build.sh --standalone       只产出单个可执行文件，不做 .app bundle
 #   build.sh --dmg              构建 .app 并打成 .dmg（可拷贝给本机使用）
 #   build.sh --sign             给 .app 做 ad-hoc 签名（Gatekeeper 放行本机）
-#   build.sh --universal        额外构建 arm64 + x86_64 通用二进制
+#   build.sh --universal        构建 arm64 + x86_64 通用 .app / 二进制
 #
 # 产物在 .build/ 下。.build 已在 .gitignore 中。
 #
@@ -75,7 +75,14 @@ fi
 
 rm -rf "$APP"
 mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
-build_for "$ARCH" "$BIN"
+if [ "$UNIVERSAL" = "1" ]; then
+  build_for arm64 .build/.app-arm64
+  build_for x86_64 .build/.app-x86_64
+  lipo -create .build/.app-arm64 .build/.app-x86_64 -output "$BIN"
+  rm -f .build/.app-arm64 .build/.app-x86_64
+else
+  build_for "$ARCH" "$BIN"
+fi
 cp Info.plist "${APP}/Contents/Info.plist"
 cp Resources/AppIcon.icns "${APP}/Contents/Resources/AppIcon.icns"
 cp Resources/LICENSE.txt "${APP}/Contents/Resources/LICENSE.txt"
