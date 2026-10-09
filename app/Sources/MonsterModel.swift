@@ -136,24 +136,33 @@ enum MonsterGeometry {
         .curve(19.3913, 6.0195, 19.6976, 5.9972, 20.0000, 6.0000),
         .close,
     ]
-    static let polygon: [CGPoint] = {
-        var points: [CGPoint] = [], p = CGPoint.zero
+    static let polygon: [CGPoint] = buildPolygon()
+
+    private static func buildPolygon() -> [CGPoint] {
+        var points: [CGPoint] = []
+        var p = CGPoint.zero
         for command in commands {
             switch command {
             case let .move(x,y): p = CGPoint(x:x,y:y); points.append(p)
             case let .curve(x1,y1,x2,y2,x3,y3):
                 let origin = p
                 for i in 1...12 {
-                    let t = Double(i)/12, u = 1-t
-                    points.append(CGPoint(x:u*u*u*origin.x + 3*u*u*t*x1 + 3*u*t*t*x2 + t*t*t*x3,
-                                          y:u*u*u*origin.y + 3*u*u*t*y1 + 3*u*t*t*y2 + t*t*t*y3))
+                    let t = Double(i) / 12.0
+                    let u = 1.0 - t
+                    let uuu = u * u * u
+                    let uut = 3.0 * u * u * t
+                    let utt = 3.0 * u * t * t
+                    let ttt = t * t * t
+                    let x = uuu * origin.x + uut * x1 + utt * x2 + ttt * x3
+                    let y = uuu * origin.y + uut * y1 + utt * y2 + ttt * y3
+                    points.append(CGPoint(x: x, y: y))
                 }
                 p = CGPoint(x:x3,y:y3)
             case .close: break
             }
         }
         return points
-    }()
+    }
     static func area(_ points: [CGPoint]) -> Double {
         guard points.count > 2 else { return 0 }
         return abs(points.indices.reduce(0) { sum, i in
