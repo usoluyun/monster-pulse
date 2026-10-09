@@ -62,7 +62,7 @@ open /Applications/MonsterPulse.app
 
 出口探测请求 Cloudflare 的 `/cdn-cgi/trace`，获取 IP 和国家；它只代表这次请求的出口。PAC、分流或 VPN 下，其他网站可能走不同线路，系统代理开关也不代表所有流量都经过代理。
 
-设置保存在本机 UserDefaults。项目没有自建后端或应用遥测；Codex 查询通过本机 CLI 完成，其认证与日志由 CLI 管理。
+设置保存在本机 UserDefaults。当前版本没有自建后端或应用遥测；Codex 查询通过本机 CLI 完成，其认证与日志由 CLI 管理。真机性能指标上报仅列入远期里程碑 M5，尚未实现。
 
 <details>
 <summary>设置面板预览</summary>
@@ -112,7 +112,7 @@ bash app/tests/run-termination-tests.sh
 
 ## 文档与贡献
 
-- [项目里程碑](docs/roadmap.md)：M1 已完成，M2 原生功能已实现、验收中；M3 / M4 仍仅规划 New API 与 OpenCode Zen / Go 接入。
+- [项目里程碑](docs/roadmap.md)：M1 已完成，M2 原生功能已实现、验收中；M3 / M4 规划用量来源，M5 规划真机性能指标上报。
 - [Monster 设计与使用](docs/monster-view-design.md)
 - [Monster 资源用量记录（2026-10-08）](docs/resource-usage-2026-10-08.md)：单机 Monster 动画 15 分钟 CPU / footprint 采样及其验收限制。
 - [文档入口](docs/README.md)
