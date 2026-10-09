@@ -125,12 +125,15 @@ func verify() throws {
 
     // 倒计时：已到期、纯分、纯小时、天+小时；整小时不能退化成「60 分后」
     let now = Date()
-    for (offset, expected) in [(0.0, "已到期"), (-3600.0, "已到期"),
-                               (60.0 * 30, "30 分后"), (3600.0 * 3, "3 小时后"),
-                               (3600.0 * 3 + 60.0 * 12, "3 小时 12 分后"),
-                               (86400.0 * 5, "5 天后"), (86400.0 * 2 + 3600.0 * 6, "2 天 6 小时后")] {
-        expect(QuotaFormat.countdown(to: now.addingTimeInterval(offset), now: now),
-               expected, "countdown(+\(Int(offset))s)")
+    let countdownCases: [(offset: TimeInterval, expected: String)] = [
+        (0, "已到期"), (-3600, "已到期"),
+        (60 * 30, "30 分后"), (3600 * 3, "3 小时后"),
+        (3600 * 3 + 60 * 12, "3 小时 12 分后"),
+        (86400 * 5, "5 天后"), (86400 * 2 + 3600 * 6, "2 天 6 小时后"),
+    ]
+    for testCase in countdownCases {
+        expect(QuotaFormat.countdown(to: now.addingTimeInterval(testCase.offset), now: now),
+               testCase.expected, "countdown(+\(Int(testCase.offset))s)")
     }
 
     // Dock 菜单结构。真实弹出只能在 Dock 上右键，没法注入，所以这里断言的是
