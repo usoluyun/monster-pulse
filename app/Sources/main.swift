@@ -33,6 +33,63 @@ func verify() throws {
         do { _ = try Quota.parse(invalid); throw ReadError.message("Invalid quota accepted") }
         catch ReadError.message(let value) { precondition(value != "Invalid quota accepted") }
     }
+
+    // New API 解析。夹具是 docs/new-api-research.md 记录的 2026-10-10 实测响应，
+    // 断言值由被测函数自己从原始 quota 算出，不写死展示文案。
+    let newAPISite = NewAPI.SiteConfig.parse(["data": [
+        "quota_per_unit": 500_000, "usd_exchange_rate": 7, "quota_display_type": "CNY",
+        "version": "v1.0.0-rc.25"]])
+    // 余额 122942348 → 122942348 / 500000 × 7 = ¥1721.192872
+    let balanceAmount = newAPISite.amount(forQuota: 122_942_348)
+    precondition(abs((balanceAmount ?? 0) - 1721.192872) < 1e-6, "New API 余额换算错误")
+    // price=7.3 与 usd_exchange_rate=7 不等，换算必须用后者。
+    precondition(newAPISite.amount(forQuota: 500_000) == 7.0, "换算必须用 usd_exchange_rate")
+    // 站点配置缺失时不得猜汇率，返回 nil 而不是假装是 1:1。
+    let noSite = NewAPI.SiteConfig.parse(["data": ["version": "v1.0.0-rc.25"]])
+    precondition(noSite.amount(forQuota: 122_942_348) == nil, "缺换算配置时不得猜汇率")
+
+    let walletUser: [String: Any] = ["success": true, "data": [
+        "quota": 122_942_348, "used_quota": 2_571_788_418, "request_count": 107_884]]
+    // 8 条小时聚合，逐条求和；count 合计 633。
+    let walletData: [String: Any] = ["success": true, "data": [
+        ["quota": 894_023, "count": 79], ["quota": 901_117, "count": 81],
+        ["quota": 889_240, "count": 78], ["quota": 902_331, "count": 80],
+        ["quota": 897_556, "count": 79], ["quota": 888_742, "count": 77],
+        ["quota": 889_523, "count": 79], ["quota": 889_650, "count": 80]]]
+    let walletSubs: [String: Any] = ["success": true, "data": [
+        "billing_preference": "subscription_first", "subscriptions": [String: Any]()]]
+    guard let wallet = NewAPI.Wallet.parse(userSelf: walletUser, dataSelf: walletData,
+        subscriptionSelf: walletSubs, site: newAPISite) else {
+        throw ReadError.message("New API 钱包解析失败") }
+    precondition(wallet.dailyBurn == 7_152_182, "近 24h 消耗必须逐条求和")
+    precondition(wallet.dailyRequests == 633, "近 24h 请求数求和错误")
+    precondition(wallet.requestCount == 107_884, "账户请求数解析错误")
+    precondition(wallet.activeSubscription == nil, "空订阅数组不等于查询失败")
+    // 预计可用天数 = 122942348 / 7152182 = 17.19 天 → 落在 7–30 档。
+    precondition(abs((wallet.runwayDays ?? 0) - 17.189488) < 1e-5, "Runway 计算错误")
+    precondition(wallet.prosperity == .comfortable, "17 天应判为充裕")
+
+    // 无近期消耗：有余额但除法无意义，不能显示成无限或富足。
+    let idle = NewAPI.Prosperity.classify(subscription: nil, balance: 100_000, dailyBurn: nil)
+    precondition(idle == .unknown, "无消耗数据必须单列，不能伪装成富足")
+    precondition(NewAPI.Prosperity.classify(subscription: nil, balance: 0, dailyBurn: nil) == .drained,
+        "余额耗尽应为见底")
+    // 套餐口径优先于钱包口径，且总额为零是不限额而非除零。
+    let sub = NewAPI.Subscription.parse(["subscription": [
+        "amount_total": 1_000_000, "amount_used": 100_000, "status": "active"]])
+    precondition(NewAPI.Prosperity.classify(subscription: sub, balance: 0, dailyBurn: nil) == .abundant,
+        "有可信套餐总额时应走套餐口径")
+    precondition(sub?.remainingFraction == 0.9)
+    let unlimited = NewAPI.Subscription.parse(["subscription": ["amount_total": 0, "amount_used": 0]])
+    precondition(unlimited?.remainingFraction == nil && unlimited?.remainingQuota == nil,
+        "不限额套餐不得当作 100%")
+    // 业务成功标记逐接口不同：user/self 用 success，billing 用 code。
+    precondition(NewAPI.isSuccess(["success": true]) && NewAPI.isSuccess(["code": 0]))
+    precondition(!NewAPI.isSuccess(["success": false]) && !NewAPI.isSuccess(["code": 1]))
+    // 站点页面的近 24h 窗口是「前 23 小时至后 1 小时」，不是严格滚动 24h。
+    let window = NewAPI.recentWindow(now: Date(timeIntervalSince1970: 1_000_000))
+    precondition(window.end == 1_003_600 && window.start == window.end - 86_400,
+        "近 24h 统计范围必须与页面口径一致")
     // 系统采样。CPU 忙碌率是「相邻两次采样的 tick 差值」，所以必须等计数器
     // 真的走格才有值。
     //
@@ -500,7 +557,7 @@ func verify() throws {
     if realConfigBefore != realConfigAfter {
         throw ReadError.message("自检不得改变真实配置域")
     }
-    print("PASS: quota parsing, missing/invalid/other buckets, CPU and memory sampling, window title and countdown formatting, dock menu structure, config clamping, quota alerts")
+    print("PASS: quota parsing, missing/invalid/other buckets, New API wallet parsing, unit conversion, prosperity levels, CPU and memory sampling, window title and countdown formatting, dock menu structure, config clamping, quota alerts")
 }
 
 if CommandLine.arguments.contains("--self-test") {
