@@ -1,5 +1,31 @@
 import Foundation
 
+/// 设置页输入的规范化规则。纯逻辑，可自检。
+enum NewAPISettings {
+    /// 规范化服务地址：缺 scheme 补 https，去掉尾部斜杠。
+    ///
+    /// 补 https 而不是默认 http——访问令牌会随 Authorization 头发出，
+    /// 明文 HTTP 下它等于公开。返回 nil 表示输入不可用。
+    static func normalizeBaseURL(_ raw: String) -> String? {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        if !text.contains("://") { text = "https://" + text }
+        while text.hasSuffix("/") { text.removeLast() }
+        guard let url = URL(string: text),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              let host = url.host, !host.isEmpty, host.contains(".") || host == "localhost"
+        else { return nil }
+        return text
+    }
+
+    /// 能否进行「检查连接」。地址无效或令牌缺失时先在这里拦一层，
+    /// 避免拿明显不完整的配置去发请求。
+    static func canCheck(baseURL: String, hasToken: Bool) -> Bool {
+        hasToken && normalizeBaseURL(baseURL) != nil
+    }
+}
+
 /// New API 只读查询客户端。
 ///
 /// 只依赖 Foundation，不 import AppKit。同步接口，配合既有的 BlockOperation

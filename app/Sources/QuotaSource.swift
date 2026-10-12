@@ -82,11 +82,28 @@ enum QuotaSnapshot {
         }
     }
 
-    /// 快照采集时刻。
+    /// 采集时刻。
     var fetchedAt: Date {
         switch self {
         case .codex(_, let fetchedAt): return fetchedAt
         case .newAPI(let wallet): return wallet.fetchedAt
+        }
+    }
+
+    /// Codex 窗口数据。New API 时为 nil——界面据此不画太阳高度与时间环，
+    /// 因为它没有可信的周期分母，画出来等于伪造。
+    var codexQuota: Quota? {
+        switch self {
+        case .codex(let quota, _): return quota
+        case .newAPI: return nil
+        }
+    }
+
+    /// New API 钱包。Codex 时为 nil。
+    var newAPIWallet: NewAPI.Wallet? {
+        switch self {
+        case .codex: return nil
+        case .newAPI(let wallet): return wallet
         }
     }
 

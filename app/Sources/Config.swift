@@ -53,6 +53,8 @@ struct Config {
         static let alertStreak = "alertFailureStreak"
         static let diskAlertThreshold = "diskReadAlertMBs"
         static let proxyURL = "codexProxyURL"
+        static let quotaSource = "quotaSource"
+        static let newAPIBaseURL = "newAPIBaseURL"
     }
 
     var systemInterval: Double
@@ -81,6 +83,20 @@ struct Config {
     /// 注意这会以明文存进 UserDefaults（本项目只代理 localhost，一般不含凭据）。
     var proxyURL: String
 
+    /// 额度来源。M3 引入，默认 Codex 以保持既有行为不变。
+    var quotaSource: QuotaSource = .codex
+
+    /// New API 服务地址。
+    ///
+    /// 这里**不含访问令牌**。令牌存 Keychain（见 KeychainStore），
+    /// 不走 UserDefaults——`proxyURL` 那条注释的前提「只代理 localhost，
+    /// 一般不含凭据」在这里不成立。
+    var newAPIBaseURL: String = ""
+
+    /// New API 访问令牌是否已保存。只记布尔值，不记内容。
+    var hasNewAPIToken: Bool { KeychainStore.read(service: KeychainStore.Slot.service,
+                                                    account: KeychainStore.Slot.accountToken) != nil }
+
     var monster = MonsterAppearance()
 
     static let `default` = Config(systemInterval: defaultSystemInterval,
@@ -91,7 +107,7 @@ struct Config {
                                   alertResetLeadMinutes: defaultAlertLead,
                                   alertFailureStreak: defaultAlertStreak,
                                   diskAlertMBs: defaultDiskAlert,
-                                  proxyURL: "")
+                                  proxyURL: "", quotaSource: .codex, newAPIBaseURL: "")
 
     /// 每次启动都要调用，把默认值注册进易失域。
     static func registerDefaults(defaults: UserDefaults = .standard) {
@@ -108,6 +124,8 @@ struct Config {
             Key.alertStreak: defaultAlertStreak,
             Key.diskAlertThreshold: defaultDiskAlert,
             Key.proxyURL: "",
+            Key.quotaSource: QuotaSource.codex.rawValue,
+            Key.newAPIBaseURL: "",
         ])
     }
 
@@ -136,7 +154,11 @@ struct Config {
                                       alertStreakRange, defaultAlertStreak),
             diskAlertMBs: clamp(d.double(forKey: Key.diskAlertThreshold),
                                 diskAlertRange, defaultDiskAlert),
-            proxyURL: d.string(forKey: Key.proxyURL) ?? "")
+            proxyURL: d.string(forKey: Key.proxyURL) ?? "",
+            // 存盘值可能被手改成任意字符串，解析失败要回退默认而不是崩。
+            quotaSource: d.string(forKey: Key.quotaSource)
+                .flatMap(QuotaSource.init(rawValue:)) ?? .codex,
+            newAPIBaseURL: d.string(forKey: Key.newAPIBaseURL) ?? "")
         if let data = d.data(forKey: "monsterAppearance"),
            let value = try? JSONDecoder().decode(MonsterAppearance.self, from: data) {
             config.monster = value.validated()
@@ -195,6 +217,31 @@ struct Config {
         proxyURL = ProxySetting.normalize(raw) ?? ""
         UserDefaults.standard.set(proxyURL, forKey: Key.proxyURL)
     }
+
+    mutating func setQuotaSource(_ value: QuotaSource) {
+        quotaSource = value
+        UserDefaults.standard.set(value.rawValue, forKey: Key.quotaSource)
+    }
+
+    /// 服务地址。存盘前规范化，补上 https:// 并去掉尾部斜杠。
+    mutating func setNewAPIBaseURL(_ raw: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        newAPIBaseURL = NewAPISettings.normalizeBaseURL(trimmed) ?? ""
+        UserDefaults.standard.set(newAPIBaseURL, forKey: Key.newAPIBaseURL)
+    }
+
+    /// 规范化后的服务地址。nil 表示未配置或格式无效。
+    var newAPIURL: URL? {
+        guard !newAPIBaseURL.isEmpty else { return nil }
+        return URL(string: newAPIBaseURL)
+    }
+
+    /// New API 的网络策略：默认直连，不继承 Codex 的应用代理。
+    ///
+    /// 公司内网域名需要绕过代理（见 ~/.zshrc 的 NO_PROXY 约定），直接把
+    /// Codex 的 localhost 代理继承过来会把请求送进代理导致连不通。
+    /// 需要代理时由设置页单独配置。
+    var newAPIProxy: URL? { nil }
 
     mutating func setMonster(_ value: MonsterAppearance) {
         monster = value.validated()
@@ -298,6 +345,15 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private var rows: [Row] = []
     private var config: Config
     private let onChange: (Config) -> Void
+    /// 额度来源切换回调。设置页不直接改 AppDelegate 状态，由外部接上
+    /// switchQuotaSource——那里才有世代推进与在途请求丢弃的逻辑。
+    private let onQuotaSourceChanged: (QuotaSource) -> Void
+    /// 「检查连接」跑在后台队列，不阻塞设置窗口。
+    private let queue: OperationQueue = {
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        return queue
+    }()
 
     // 刷新频率
     private let systemSlider = NSSlider(value: 5, minValue: Config.systemIntervalRange.lowerBound,
@@ -315,6 +371,21 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
                                        target: nil, action: nil)
     private let memoryCheckbox = NSButton(checkboxWithTitle: "在图标与详情中显示内存", target: nil, action: nil)
     private let diskCheckbox = NSButton(checkboxWithTitle: "在图标与详情中显示磁盘读写", target: nil, action: nil)
+    // 额度来源（M3）
+    private let sourcePicker = NSSegmentedControl(labels: QuotaSource.allCases.map(\.label),
+                                                  trackingMode: .selectOne, target: nil, action: nil)
+    private let newAPIAddressTitle = NSTextField(labelWithString: "服务地址")
+    private let newAPIAddressField = NSTextField(string: "")
+    private let newAPITokenTitle = NSTextField(labelWithString: "访问令牌")
+    private let newAPITokenField = NSSecureTextField(string: "")
+    private let newAPIStatus = NSTextField(wrappingLabelWithString: "")
+    private let checkConnectionButton = NSButton(title: "检查连接", target: nil, action: nil)
+    private let clearTokenButton = NSButton(title: "清除令牌", target: nil, action: nil)
+    /// 渲染夹具覆盖令牌已保存态。nil 时读真实 Keychain。
+    ///
+    /// 真实态取决于这台机器填过令牌没有——照着真值画，基线图就会随机器
+    /// 状态漂移（这跟自启状态、.build vs /Applications 是同一类问题）。
+    var renderHasNewAPITokenOverride: Bool?
     // 预警
     private let alertsCheckbox = NSButton(checkboxWithTitle: "启用额度预警（Dock 图标跳动）",
                                           target: nil, action: nil)
@@ -346,9 +417,11 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let launchSettingsButton = NSButton(title: "打开「登录项」设置…",
                                                 target: nil, action: nil)
 
-    init(config: Config, onChange: @escaping (Config) -> Void) {
+    init(config: Config, onChange: @escaping (Config) -> Void,
+         onQuotaSourceChanged: @escaping (QuotaSource) -> Void = { _ in }) {
         self.config = config
         self.onChange = onChange
+        self.onQuotaSourceChanged = onQuotaSourceChanged
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: Self.windowWidth, height: 480),
                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
         super.init()
@@ -359,6 +432,18 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 
     // MARK: 行构建
+
+    /// 切换来源后整段重排。
+    ///
+    /// 旧实现会把 New API 的地址、令牌、检查连接几行留在原地并置灰，
+    /// 但那样用户仍能点到输入框、也能看到占位符，很容易以为配置还在生效。
+    /// 直接重建更符合「不可用的配置不该可见」。
+    private func rebuildRows() {
+        content.subviews.forEach { $0.removeFromSuperview() }
+        rows.removeAll()
+        buildRows()
+        resizeWindow()
+    }
 
     private func heading(_ text: String) -> NSView {
         let label = NSTextField(labelWithString: text)
@@ -380,6 +465,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         append(heading("刷新频率"), height: 15, gapBefore: 0)
         appendSlider(systemLabel, systemSlider, height: 17, gapBefore: 10)
         appendSlider(quotaLabel, quotaSlider, height: 17, gapBefore: 8)
+
+        buildSourceRows()
 
         append(heading("显示"), height: 15, gapBefore: 20)
         for box in [cpuCheckbox, gpuCheckbox, memoryCheckbox, diskCheckbox] {
@@ -434,6 +521,132 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     }
 
     /// 「启动」分组。自启状态由 `LaunchAtLogin` 从系统读，本地不留副本。
+    /// 额度来源段。选 Codex 时把 New API 的几行折叠掉——
+    /// 让不可用的配置项保持可见只会让人以为它在生效。
+    private func buildSourceRows() {
+        append(heading("额度来源"), height: 15, gapBefore: 20)
+        sourcePicker.target = self
+        sourcePicker.action = #selector(sourceChanged)
+        content.addSubview(sourcePicker)
+        rows.append(Row(view: sourcePicker, height: 24, gapBefore: 10, width: nil))
+
+        sourcePicker.selectedSegment = QuotaSource.allCases.firstIndex(of: config.quotaSource) ?? 0
+        guard config.quotaSource == .newAPI else { return }
+        // 夹具可覆盖令牌已保存态，避免基线随机器状态漂移。
+        let hasToken = renderHasNewAPITokenOverride ?? config.hasNewAPIToken
+        newAPIAddressField.stringValue = config.newAPIBaseURL
+
+        newAPIAddressTitle.font = .systemFont(ofSize: 12)
+        newAPIAddressField.isEditable = true
+        newAPIAddressField.isBezeled = true
+        newAPIAddressField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        newAPIAddressField.placeholderString = "https://codingplan.at-our.com"
+        newAPIAddressField.target = self
+        newAPIAddressField.action = #selector(newAPIAddressChanged)
+        content.addSubview(newAPIAddressTitle)
+        content.addSubview(newAPIAddressField)
+        rows.append(Row(view: newAPIAddressTitle, height: 17, gapBefore: 12, width: nil))
+        rows.append(Row(view: newAPIAddressField, height: 20, gapBefore: -17, width: nil))
+
+        newAPITokenTitle.font = .systemFont(ofSize: 12)
+        // 安全输入框：令牌不在屏幕上以明文出现，也不进剪贴板历史。
+        newAPITokenField.isEditable = true
+        newAPITokenField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        newAPITokenField.placeholderString = hasToken ? "已保存在钥匙串，留空则不修改" : "账户访问令牌"
+        newAPITokenField.target = self
+        newAPITokenField.action = #selector(newAPITokenChanged)
+        content.addSubview(newAPITokenTitle)
+        content.addSubview(newAPITokenField)
+        rows.append(Row(view: newAPITokenTitle, height: 17, gapBefore: 8, width: nil))
+        rows.append(Row(view: newAPITokenField, height: 20, gapBefore: -17, width: nil))
+
+        checkConnectionButton.target = self
+        checkConnectionButton.action = #selector(checkNewAPIConnection)
+        content.addSubview(checkConnectionButton)
+        rows.append(Row(view: checkConnectionButton, height: 22, gapBefore: 10, width: nil))
+
+        clearTokenButton.target = self
+        clearTokenButton.action = #selector(clearNewAPIToken)
+        clearTokenButton.isEnabled = hasToken
+        content.addSubview(clearTokenButton)
+        rows.append(Row(view: clearTokenButton, height: 22, gapBefore: 2, width: nil))
+
+        newAPIStatus.font = .systemFont(ofSize: 10)
+        newAPIStatus.textColor = .secondaryLabelColor
+        newAPIStatus.stringValue = "令牌存 macOS 钥匙串，不写入偏好设置、不进日志。New API 不提供周期额度窗口，因此不显示时间进度环。"
+        content.addSubview(newAPIStatus)
+        // 三行：提示较长，单行会被截断
+        rows.append(Row(view: newAPIStatus, height: 42, gapBefore: 6, width: nil))
+    }
+
+    @objc private func sourceChanged() {
+        let next = QuotaSource.allCases[max(0, sourcePicker.selectedSegment)]
+        config.setQuotaSource(next)
+        rebuildRows()
+        // 换来源必须走切换路径：推进世代、丢弃在途旧结果、清空旧显示。
+        onQuotaSourceChanged(next)
+    }
+
+    @objc private func newAPIAddressChanged() {
+        config.setNewAPIBaseURL(newAPIAddressField.stringValue)
+        newAPIAddressField.stringValue = config.newAPIBaseURL
+    }
+
+    @objc private func newAPITokenChanged() {
+        let typed = newAPITokenField.stringValue
+        // 留空表示「不修改」：安全框无法回显已存令牌，
+        // 清空重输会逼用户每次打开设置都重打一遍。
+        guard !typed.isEmpty else {
+            newAPITokenField.stringValue = ""
+            return
+        }
+        _ = KeychainStore.save(typed, service: KeychainStore.Slot.service,
+                               account: KeychainStore.Slot.accountToken)
+        newAPITokenField.stringValue = ""
+        newAPITokenField.placeholderString = "已保存在钥匙串，留空则不修改"
+        clearTokenButton.isEnabled = true
+    }
+
+    @objc private func clearNewAPIToken() {
+        _ = KeychainStore.delete(service: KeychainStore.Slot.service,
+                                 account: KeychainStore.Slot.accountToken)
+        newAPITokenField.placeholderString = "账户访问令牌"
+        clearTokenButton.isEnabled = false
+    }
+
+    /// 「检查连接」在后台跑，界面先回「检查中…」再更新结果。
+    @objc private func checkNewAPIConnection() {
+        guard let base = config.newAPIURL else {
+            newAPIStatus.stringValue = "服务地址无效：需要形如 https://example.com 的地址"
+            return
+        }
+        guard config.hasNewAPIToken else {
+            newAPIStatus.stringValue = "尚未保存访问令牌"
+            return
+        }
+        guard let token = KeychainStore.read(service: KeychainStore.Slot.service,
+                                             account: KeychainStore.Slot.accountToken) else { return }
+        newAPIStatus.stringValue = "检查中…"
+        checkConnectionButton.isEnabled = false
+        let client = NewAPIClient(baseURL: base, accessToken: token, proxyURL: config.newAPIProxy)
+        queue.addOperation {
+            let message: String
+            do { message = Self.describe(try client.checkConnection()) }
+            catch { message = error.localizedDescription }
+            DispatchQueue.main.async {
+                self.checkConnectionButton.isEnabled = true
+                self.newAPIStatus.stringValue = message
+            }
+        }
+    }
+
+    private static func describe(_ diagnostics: NewAPIClient.Diagnostics) -> String {
+        var parts = ["连接成功 \(diagnostics.version)", diagnostics.balanceNote,
+                     diagnostics.unitNote, "富足度：\(diagnostics.prosperity.label)"]
+        parts.append(diagnostics.hasSubscription ? "检测到套餐，按套餐额度比例显示" : "无套餐，按预计可用天数显示")
+        return parts.joined(separator: " · ")
+    }
+
     private func buildLaunchRows() {
         append(heading("启动"), height: 15, gapBefore: 20)
         launchCheckbox.target = self
@@ -589,6 +802,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         streakSlider.doubleValue = config.alertFailureStreak
         diskSlider.doubleValue = config.diskAlertMBs
         proxyField.stringValue = config.proxyURL
+        // 选中段不设的话，分段控件会把两项画成同一副样子——看着像没生效。
+        sourcePicker.selectedSegment = QuotaSource.allCases.firstIndex(of: config.quotaSource) ?? 0
         refreshLaunchControls()
         updateLabels()
     }

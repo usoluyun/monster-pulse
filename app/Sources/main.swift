@@ -390,6 +390,30 @@ func verify() throws {
         }
     }
 
+    // 服务地址规范化。补 https 而不是默认 http：访问令牌随 Authorization
+    // 头发出，明文 HTTP 下等于公开。
+    if NewAPISettings.normalizeBaseURL("codingplan.at-our.com") != "https://codingplan.at-our.com" {
+        failures.append("缺 scheme 时应补 https") }
+    if NewAPISettings.normalizeBaseURL("https://a.example/") != "https://a.example" {
+        failures.append("尾部斜杠应被去掉") }
+    if NewAPISettings.normalizeBaseURL("  https://a.example  ") != "https://a.example" {
+        failures.append("首尾空白应被去掉") }
+    for invalid in ["", "   ", "ftp://a.example", "https://", "not a url", "file:///etc"] {
+        if NewAPISettings.normalizeBaseURL(invalid) != nil {
+            failures.append("无效地址应被拒绝：\(invalid)") }
+    }
+    if NewAPISettings.canCheck(baseURL: "https://a.example", hasToken: false) {
+        failures.append("无令牌时不应允许检查连接") }
+    if NewAPISettings.canCheck(baseURL: "", hasToken: true) {
+        failures.append("无地址时不应允许检查连接") }
+    if !NewAPISettings.canCheck(baseURL: "a.example", hasToken: true) {
+        failures.append("地址与令牌齐备时应允许检查连接") }
+    // New API 快照不提供 Codex 窗口，界面据此不画时间环。
+    let newAPISnapshot = QuotaSnapshot.newAPI(wallet)
+    if newAPISnapshot.codexQuota != nil { failures.append("New API 快照不得携带 Codex 窗口") }
+    if newAPISnapshot.newAPIWallet == nil { failures.append("New API 快照应携带钱包") }
+    if codexSnapshot.newAPIWallet != nil { failures.append("Codex 快照不得携带钱包") }
+
     // 额度充足、无重置临近、无失败 → 无预警
     expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 92, resetIn: 3600 * 3),
                                                failureStreak: 0, diskReadMBs: nil, config: alertConfig, now: alertNow)),
@@ -825,7 +849,7 @@ if CommandLine.arguments.contains("--settings-render-test") {
     // 把设置窗口离屏渲染成 PNG。与 --details-render-test 同一手法。
     // 用途：验证面板布局（新增控件有没有被挤出可视区），以及让用户直接看到
     // 每个配置项长什么样，不必靠猜。
-    // 用法: MonsterPulse --settings-render-test <out.png> [proxy|dns|nometers|alerts-off|login-on|login-off|full]
+    // 用法: MonsterPulse --settings-render-test <out.png> [proxy|dns|nometers|alerts-off|login-on|login-off|newapi|full]
     let args = Array(CommandLine.arguments.dropFirst(2))
     let out = args.first ?? "/tmp/monsterpulse-settings.png"
     let state = args.count > 1 ? args[1] : "full"
@@ -846,6 +870,15 @@ if CommandLine.arguments.contains("--settings-render-test") {
                                       alertResetLeadMinutes: base.alertResetLeadMinutes,
                                       alertFailureStreak: base.alertFailureStreak,
                                       diskAlertMBs: base.diskAlertMBs, proxyURL: base.proxyURL)
+    case "newapi":     config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
+                                      showCPU: base.showCPU, showMemory: base.showMemory, showGPU: base.showGPU, showDisk: base.showDisk,
+                                      alertsEnabled: base.alertsEnabled,
+                                      alertQuotaThreshold: base.alertQuotaThreshold,
+                                      alertResetLeadMinutes: base.alertResetLeadMinutes,
+                                      alertFailureStreak: base.alertFailureStreak,
+                                      diskAlertMBs: base.diskAlertMBs, proxyURL: base.proxyURL,
+                                      quotaSource: .newAPI,
+                                      newAPIBaseURL: "https://codingplan.at-our.com")
     case "dns":        config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
                                       showCPU: base.showCPU, showMemory: base.showMemory,
                                       showGPU: base.showGPU, alertsEnabled: base.alertsEnabled,
@@ -862,6 +895,12 @@ if CommandLine.arguments.contains("--settings-render-test") {
                                       diskAlertMBs: base.diskAlertMBs, proxyURL: "127.0.0.1:12334")
     }
     let controller = SettingsWindowController(config: config) { _ in }
+    // 勾选态必须由夹具钉死，不能读真实 UserDefaults。
+    //
+    // 真实域里「已保存访问令牌」取决于这台机器之前填过没有，基线图
+    // 不能跟着机器状态漂。强制置 false 让 newapi 夹具固定画未保存态。
+    // 「令牌已保存」这一态由真机点验覆盖，不由基准图覆盖。
+    controller.renderHasNewAPITokenOverride = false
     // 自启状态一律钉死，不读系统真值。
     //
     // 不钉的话基线图会随「用户是否开启过自启」「跑的是 .build 还是
@@ -1311,6 +1350,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var lastDockState = ""
     /// 当前额度来源。M3 引入，默认 Codex——保持既有行为不变。
     var quotaSource: QuotaSource = .codex
+    /// 最近一次成功采集的快照。Codex 走 `quota`，New API 走钱包。
+    var snapshot: QuotaSnapshot?
     /// 请求世代。切来源或手动刷新时推进，用来丢弃在途的旧来源结果。
     var epoch = QuotaEpoch.initial
 
@@ -1545,6 +1586,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let previous = self.config
                 self.config = updated
                 self.configChanged(previous: previous)
+            } onQuotaSourceChanged: { [weak self] next in
+                self?.switchQuotaSource(next)
             }
         }
         settings.show()
@@ -1558,9 +1601,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 没有它，切到新来源后在途的 Codex 结果会覆盖新来源的显示，
         // 而且只在 Codex 查询更慢时才出现，极难复现。
         let issued = epoch
+        // 取数方式按来源分派。两个来源的口径完全不同，返回类型也不同，
+        // 所以各自解析成 QuotaSnapshot 之后再统一落到显示层。
         operation.addExecutionBlock { [weak self, weak operation] in
-            let result = Result { try CodexReader.read(proxy: self?.config.proxyURL,
-                                                 cancelled: { operation?.isCancelled ?? true }) }
+            let cancelled = { operation?.isCancelled ?? true }
+            let source = self?.quotaSource ?? .codex
+            let config = self?.config
+            let result = Result { () -> QuotaSnapshot in
+                switch source {
+                case .codex:
+                    let quota = try CodexReader.read(proxy: config?.proxyURL, cancelled: cancelled)
+                    return .codex(quota, fetchedAt: Date())
+                case .newAPI:
+                    guard let config, let base = config.newAPIURL else {
+                        throw ReadError.message("尚未配置 New API 服务地址")
+                    }
+                    guard let token = KeychainStore.read(service: KeychainStore.Slot.service,
+                                                         account: KeychainStore.Slot.accountToken) else {
+                        throw ReadError.message("尚未保存 New API 访问令牌")
+                    }
+                    let client = NewAPIClient(baseURL: base, accessToken: token,
+                                              proxyURL: config.newAPIProxy)
+                    return .newAPI(try client.fetchWallet(cancelled: cancelled))
+                }
+            }
             DispatchQueue.main.async {
                 guard let self else { return }
                 // 世代已推进：来源切换或刷新期间又发起了新请求，
@@ -1568,8 +1632,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard self.epoch.accepts(issued) else { return }
                 self.loading = false
                 switch result {
-                case .success(let value):
-                    self.quota = value; self.updated = Date(); self.errorText = nil
+                case .success(let snapshot):
+                    self.snapshot = snapshot
+                    self.quota = snapshot.codexQuota      // New API 时为 nil，界面据此不画时间环
+                    self.updated = Date(); self.errorText = nil
                     self.failureStreak = 0
                 case .failure(let error):
                     self.errorText = error.localizedDescription
@@ -1593,6 +1659,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         epoch = epoch.advanced()
         // 清空旧来源的显示与预警基线。新来源的数据到达前保持空白，
         // 不用旧数字冒充新来源。
+        snapshot = nil
         quota = nil
         updated = nil
         errorText = nil
