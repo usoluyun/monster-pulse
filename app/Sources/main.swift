@@ -97,6 +97,27 @@ func verify() throws {
     // 站点页面的近 24h 窗口是「前 23 小时至后 1 小时」，不是严格滚动 24h。
     let window = NewAPI.recentWindow(now: Date(timeIntervalSince1970: 1_000_000))
     if window.end != 1_003_600 || window.start != window.end - 86_400 { failures.append("近 24h 统计范围必须与页面口径一致") }
+
+    // 来源适配层。重点验证世代守卫：切来源后在途的旧请求仍会返回，
+    // 不比对世代就会覆盖新来源显示，且只在旧请求更慢时偶发。
+    if !QuotaEpoch.initial.accepts(.initial) { failures.append("同世代应被接受") }
+    if QuotaEpoch.initial.accepts(.initial.advanced()) { failures.append("旧世代结果不得被接受") }
+    if !QuotaEpoch.initial.advanced().accepts(.initial.advanced()) { failures.append("推进后新世代应被接受") }
+    if QuotaEpoch.initial.advanced().advanced().accepts(.initial) { failures.append("跨代不得被接受") }
+    // 只有 Codex 有时间窗口；New API 不得映射出太阳高度或时间环。
+    if !QuotaSource.codex.hasTimeWindow || QuotaSource.newAPI.hasTimeWindow { failures.append("来源时间窗口能力判定错误") }
+    // 缓存隔离：换地址或换凭据必须得到不同的键，同一组合则稳定。
+    let keyA = QuotaCacheKey(baseURL: "https://a.example", accessToken: "token-1")
+    let keyB = QuotaCacheKey(baseURL: "https://a.example", accessToken: "token-2")
+    let keyC = QuotaCacheKey(baseURL: "https://b.example", accessToken: "token-1")
+    if keyA == keyB || keyA == keyC { failures.append("缓存键未按地址与凭据隔离") }
+    if keyA != QuotaCacheKey(baseURL: "https://a.example", accessToken: "token-1") { failures.append("同地址同凭据应命中同一缓存键") }
+    if keyA.credentialFingerprint.contains("token-1") { failures.append("缓存键不得包含令牌明文") }
+    // 陈旧阈值按来源分开，避免 New API 在正常轮询下频繁报陈旧。
+    let codexSnapshot = QuotaSnapshot.codex(q, fetchedAt: Date(timeIntervalSince1970: 1_700_000_000))
+    if !codexSnapshot.isStale(now: Date(timeIntervalSince1970: 1_700_000_000 + 16 * 60)) { failures.append("Codex 16 分钟应判陈旧") }
+    if codexSnapshot.isStale(now: Date(timeIntervalSince1970: 1_700_000_000 + 14 * 60)) { failures.append("Codex 14 分钟不应判陈旧") }
+    if codexSnapshot.source != .codex { failures.append("快照来源判定错误") }
     // 系统采样。CPU 忙碌率是「相邻两次采样的 tick 差值」，所以必须等计数器
     // 真的走格才有值。
     //
@@ -1265,6 +1286,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var sleeping = false
     var loading = false
     var lastDockState = ""
+    /// 当前额度来源。M3 引入，默认 Codex——保持既有行为不变。
+    var quotaSource: QuotaSource = .codex
+    /// 请求世代。切来源或手动刷新时推进，用来丢弃在途的旧来源结果。
+    var epoch = QuotaEpoch.initial
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         queue.maxConcurrentOperationCount = 1
@@ -1311,6 +1336,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.network.stop()
             self.animationTimer?.invalidate(); self.animationTimer = nil
             self.sleeping = true; self.timers.forEach { $0.invalidate() }; self.queue.cancelAllOperations()
+            // 跨睡眠的结果一律作废：机器睡着期间额度窗口可能已重置，
+            // 醒来后收到的是睡眠前的数据反而是错的。推进世代让它的完成回调
+            // 直接丢弃。loading 也在这里复位——不这样的话，唤醒后 refresh()
+            // 会被 guard !loading 挡住，额度再也不刷新（该任务已记为真机未验证，
+            // 这里只是把世代与复位补齐，睡眠/唤醒本身仍需真机覆盖）。
+            self.epoch = self.epoch.advanced(); self.loading = false
         })
         observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
@@ -1499,11 +1530,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !loading && !sleeping else { return }
         loading = true; render()
         let operation = BlockOperation()
+        // 发起时记下世代，回来时比对。切来源不会取消在途请求
+        // （refresh() 用 guard !loading 挡住并发），所以这一步是必需的：
+        // 没有它，切到新来源后在途的 Codex 结果会覆盖新来源的显示，
+        // 而且只在 Codex 查询更慢时才出现，极难复现。
+        let issued = epoch
         operation.addExecutionBlock { [weak self, weak operation] in
             let result = Result { try CodexReader.read(proxy: self?.config.proxyURL,
                                                  cancelled: { operation?.isCancelled ?? true }) }
             DispatchQueue.main.async {
-                guard let self else { return }; self.loading = false
+                guard let self else { return }
+                // 世代已推进：来源切换或刷新期间又发起了新请求，
+                // 这个结果直接丢弃，连 loading 都不能清——那属于新请求的状态。
+                guard self.epoch.accepts(issued) else { return }
+                self.loading = false
                 switch result {
                 case .success(let value):
                     self.quota = value; self.updated = Date(); self.errorText = nil
@@ -1517,6 +1557,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         queue.addOperation(operation)
+    }
+
+    /// 切换额度来源。
+    ///
+    /// 切换不只是换一个枚举值：旧来源的显示、预警基线和在途结果都要作废，
+    /// 否则会短暂出现「新来源的标签配旧来源的数字」这种自相矛盾的状态。
+    func switchQuotaSource(_ next: QuotaSource) {
+        guard next != quotaSource else { return }
+        quotaSource = next
+        // 推进世代 → 在途的旧来源结果回来时会被丢弃
+        epoch = epoch.advanced()
+        // 清空旧来源的显示与预警基线。新来源的数据到达前保持空白，
+        // 不用旧数字冒充新来源。
+        quota = nil
+        updated = nil
+        errorText = nil
+        failureStreak = 0
+        alertTracker.reset()
+        loading = false
+        render()
+        refresh()
     }
     @objc func changeMode(_ sender: NSSegmentedControl) {
         var appearance = config.monster
