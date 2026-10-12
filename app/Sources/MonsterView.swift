@@ -46,13 +46,17 @@ final class MonsterView: NSView {
     var gpu: Double?
     var proxyEnabled: Bool?
     var stale = false
+    /// New API 富足度。非 nil 时启用零钱罐形态与弯眼微笑。
+    var prosperity: NewAPI.Prosperity?
+    /// 零钱罐形态与原轮廓的混合比例 0...1。1 为完全零钱罐。
+    var blend = 0.0
     var phase = 0.0
     var hero = false
     var reduceMotionOverride: Bool?
     override var isFlipped: Bool { true }
-    private static let body: NSBezierPath = {
+    private static func path(_ commands: [MonsterGeometry.Command]) -> NSBezierPath {
         let path = NSBezierPath()
-        for command in MonsterGeometry.commands {
+        for command in commands {
             switch command {
             case let .move(x,y): path.move(to:NSPoint(x:x,y:y))
             case let .curve(x1,y1,x2,y2,x3,y3): path.curve(to:NSPoint(x:x3,y:y3), controlPoint1:NSPoint(x:x1,y:y1), controlPoint2:NSPoint(x:x2,y:y2))
@@ -60,8 +64,136 @@ final class MonsterView: NSView {
             }
         }
         return path
-    }()
+    }
+    private static let body = path(MonsterGeometry.commands)
+    /// 零钱罐形态轮廓。仅在 New API 来源下使用。
+    private static let piggyBody = path(MonsterGeometry.piggyCommands)
+    /// 零钱罐形态下的硬币数量。四档富足度各配一个可辨识的数量，
+    /// 让「剩多少钱」在 43pt 下也能读出量级差别，而不是只靠颜色。
+    ///
+    /// 注意这表达的是**绝对金额**（每枚代表一个固定额度档），不是百分比：
+    /// New API 没有可信的周期分母，做成百分比等于伪造。金额档位阈值待实测校准。
+    static func coinCount(_ prosperity: NewAPI.Prosperity) -> Int {
+        switch prosperity {
+        case .abundant: return 8
+        case .comfortable: return 6
+        case .tight: return 4
+        case .drained: return 2
+        case .unknown: return 0
+        }
+    }
+
+    /// 富足度 → 微笑程度 0...1。
+    ///
+    /// §20.2 禁止嘴、鼻、耳，所以「微笑」只能落在眼形上：
+    /// §20.3 已认可 happy 用「向上弯起的弯眼」，这里复用同一条通道，
+    /// 不新增任何面部结构。
+    static func smile(_ prosperity: NewAPI.Prosperity) -> Double {
+        switch prosperity {
+        case .abundant: return 1.0
+        case .comfortable: return 0.78
+        case .tight: return 0.5
+        case .drained: return 0.0
+        case .unknown: return 0.5
+        }
+    }
+
     override func draw(_ dirtyRect: NSRect) { drawScene(in: bounds) }
+
+    /// 眼睛。`prosperity` 为 nil 时是 Codex 的竖椭圆眼；
+    /// 非 nil 时按微笑程度把上缘向上弯——§20.2 禁止嘴鼻耳，
+    /// 「微笑」只能走 §20.3 已认可的弯眼通道。
+    private func drawEyes(in context: CGContext, prosperity: NewAPI.Prosperity?) {
+        let bodyColor = NSColor.monsterHex((remaining ?? 0) < 40 ? style.usedColor : style.remainingColor)
+        let rgb = bodyColor.usingColorSpace(.sRGB) ?? .white
+        let light = rgb.redComponent*0.2126 + rgb.greenComponent*0.7152 + rgb.blueComponent*0.0722
+        (light > 0.5 ? NSColor.monsterHex("#171b21") : .white).setFill()
+        // 零钱罐形态的眼睛位置与原形不同，硬套原坐标会让眼睛掉出身体。
+        typealias Anatomy = MonsterGeometry.PiggyAnatomy
+        let eyes: [(x: Double, y: Double)] = prosperity == nil ? [(20, 17), (26, 17)] : Anatomy.eyes
+        let eyeWidth = prosperity == nil ? 4.0 : Anatomy.eyeWidth
+        let eyeHeight = prosperity == nil ? 8.0 : Anatomy.eyeHeight
+        for (index, eye) in eyes.enumerated() {
+            let x = eye.x, y0 = eye.y
+            guard let prosperity else {
+                NSBezierPath(roundedRect: NSRect(x: x, y: y0, width: eyeWidth, height: eyeHeight),
+                             xRadius: 2, yRadius: 2).fill()
+                continue
+            }
+            let amount = Self.smile(prosperity)
+            let y1 = y0 + eyeHeight, w = eyeWidth
+            // 弯度：0 为竖椭圆（与 Codex 眼一致），1 为明显上弯的弯眼。
+            //
+            // 上缘向上拱、下缘压平，两者同时随 amount 变化——只弯一条边会读成
+            // 「眼睛歪了」，两条边一起弯才是「眯眼笑」。两只眼按 index 轻微
+            // 错开，避免整排弯眼看着像机械复制。
+            let skew = amount * (index == 0 ? 1.0 : 0.86)
+            let rise = eyeHeight * 0.62 * skew
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: x, y: y0))
+            // 下缘：由中间高点回落到两端，弧顶高度随笑度上升
+            path.curve(to: NSPoint(x: x + w, y: y0),
+                       controlPoint1: NSPoint(x: x + w*0.18, y: y0 + rise*0.92),
+                       controlPoint2: NSPoint(x: x + w*0.82, y: y0 + rise*0.92))
+            // 上缘：由两端拱到中间，与下缘合成弧形而非斜块
+            path.curve(to: NSPoint(x: x, y: y1),
+                       controlPoint1: NSPoint(x: x + w*0.82, y: y1 + rise*0.55),
+                       controlPoint2: NSPoint(x: x + w*0.18, y: y1 + rise*0.55))
+            path.close()
+            path.fill()
+        }
+    }
+
+    /// 零钱罐形态。仅在 New API 来源且拿到钱包时绘制。
+    ///
+    /// 单独一层而不是替换身体：§20.4 要求「身体连续重塑为物品」，
+    /// 但那只描述造型意图；实际绘制上，形态之间不应该出现跳变，
+    /// 否则切来源的瞬间会闪一下。所以这里的零钱罐与原轮廓是**叠加**
+    /// 在同一坐标里，形态切换留给后续的变形动画，中间态由 blend 控制。
+    private func drawPiggy(in context: CGContext) {
+        // 调用方已处于角色变换内（与原身体同一坐标），这里不要再做定位。
+        guard let prosperity else { return }
+        context.saveGState()
+        // 从原形「长」成零钱罐：以身体底边中心为锚点轻微放大，
+        // 让形态变化看起来是生长而不是贴图切换。
+        let grow = 1 + (1-blend)*0.06
+        context.translateBy(x: 24.5, y: 41)
+        context.scaleBy(x: blend*grow, y: blend*grow)
+        context.translateBy(x: -24.5, y: -41)
+
+        typealias Anatomy = MonsterGeometry.PiggyAnatomy
+        let color = NSColor.monsterHex(style.remainingColor)
+        color.setFill()
+        Self.piggyBody.fill()
+
+        // 投币口：画在背脊上缘偏左，居中会被读成嘴。
+        NSColor.monsterHex("#171b21").withAlphaComponent(0.45).setFill()
+        NSBezierPath(roundedRect: NSRect(x: Anatomy.slot.x, y: Anatomy.slot.y,
+                                        width: Anatomy.slot.width, height: Anatomy.slot.height),
+                     xRadius: Anatomy.slot.height/2, yRadius: Anatomy.slot.height/2).fill()
+
+        // 硬币：表达绝对金额的数量，不表达百分比。
+        let coins = Self.coinCount(prosperity)
+        if coins > 0 {
+            let rgb = color.usingColorSpace(.sRGB) ?? .white
+            let light = rgb.redComponent*0.2126 + rgb.greenComponent*0.7152 + rgb.blueComponent*0.0722
+            NSColor.monsterHex(light > 0.5 ? "#c9a34b" : "#e2b95f").setFill()
+            NSColor.monsterHex("#171b21").withAlphaComponent(0.3).setStroke()
+            // 自投币口向上堆，两列交错；硬币不得超出 48×48 画布上沿，
+            // 超出就跳过而不是画到图标外面。
+            for i in 0..<coins {
+                let column = i % 2, rank = i / 2
+                let cx = Anatomy.coinCenter.x + Double(column)*Anatomy.coinColumnGap
+                let cy = Anatomy.coinCenter.y - Double(rank)*Anatomy.coinSpacing
+                guard cy - Anatomy.coinRadius > 1 else { continue }
+                let coin = NSBezierPath(ovalIn: NSRect(x: cx - Anatomy.coinRadius, y: cy - Anatomy.coinRadius,
+                                            width: Anatomy.coinRadius*2, height: Anatomy.coinRadius*2))
+                coin.lineWidth = 0.35
+                coin.fill(); coin.stroke()
+            }
+        }
+        context.restoreGState()
+    }
     func drawScene(in rect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
         context.saveGState()
@@ -99,6 +231,14 @@ final class MonsterView: NSView {
         context.translateBy(x:24.5,y:41+max(-2.5,min(2.5,pulse*c*2.5*gain)))
         context.scaleBy(x:wide,y:stretch*(1-squeeze*0.25))
         context.translateBy(x:-24.5,y:-41)
+        // 零钱罐形态与原轮廓必须画在**同一个变换里**。
+        //
+        // 之前把 drawPiggy 放在角色变换之外（restoreGState 之后），结果零钱罐
+        // 用未经缩放的 48×48 坐标直接画，而原身体经过了 scale/wide/stretch，
+        // 两者根本不在同一位置——渲染出来是白色零钱罐浮在灰色身体左上角，
+        // 完全脱开。形态是「身体重塑」，不是「旁边多一个东西」。
+        let piggyForm = blend > 0.01 && prosperity != nil
+        let echoAlpha = piggyForm ? 0.28*(1-blend) : 0.28
         context.saveGState()
         context.translateBy(x:3,y:-0.7)
         if weekRemaining != nil {
@@ -110,28 +250,36 @@ final class MonsterView: NSView {
                 y:(115-week*90-10-107-vertical)/sy+41+0.7,width:20/sx,height:20/sy))
             context.clip(using:.evenOdd)
         }
-        NSColor(calibratedWhite:0.65,alpha:0.28).setStroke()
+        NSColor(calibratedWhite:0.65,alpha:echoAlpha).setStroke()
         Self.body.lineWidth = 0.85; Self.body.stroke()
         context.restoreGState()
-        NSColor.monsterHex(remaining == nil ? "#90969d" : style.remainingColor).setFill(); Self.body.fill()
-        if let cutoff {
+        NSColor.monsterHex(remaining == nil ? "#90969d" : style.remainingColor)
+            .withAlphaComponent(piggyForm ? 1-blend : 1).setFill()
+        Self.body.fill()
+        if let cutoff, !piggyForm {
             context.saveGState(); Self.body.addClip()
             NSColor.monsterHex(style.usedColor).setFill()
             NSRect(x:0,y:cutoff,width:48,height:48-cutoff).fill(); context.restoreGState()
         }
-        let bodyColor = NSColor.monsterHex((remaining ?? 0) < 40 ? style.usedColor : style.remainingColor)
-        let rgb = bodyColor.usingColorSpace(.sRGB) ?? .white
-        let light = rgb.redComponent*0.2126 + rgb.greenComponent*0.7152 + rgb.blueComponent*0.0722
-        (light > 0.5 ? NSColor.monsterHex("#171b21") : .white).setFill()
-        for x in [20.0,26.0] { NSBezierPath(roundedRect:NSRect(x:x,y:17,width:4,height:8),xRadius:2,yRadius:2).fill() }
+        if piggyForm { drawPiggy(in: context) }
+        drawEyes(in: context, prosperity: blend > 0.5 ? prosperity : nil)
         context.restoreGState()
-        // The tracks and both corner arcs stay inside the icon's rounded clipping mask.
-        NSColor.monsterHex(style.shortRingColor).withAlphaComponent(0.12).setStroke(); Self.ringTracks[0].stroke()
-        NSColor.monsterHex(style.weekRingColor).withAlphaComponent(0.12).setStroke(); Self.ringTracks[1].stroke()
-        NSColor.monsterHex(style.shortRingColor).withAlphaComponent(0.72).setStroke(); shortRing?.stroke()
-        NSColor.monsterHex(style.weekRingColor).withAlphaComponent(0.52).setStroke(); weekRing?.stroke()
+        // 时间环与太阳只属于 Codex 形态：New API 没有 5h/周窗口，
+        // 画出来等于伪造一个不存在的周期预算。轨道同样不画——空轨道会让人
+        // 以为「时间进度还没开始」。
+        if !piggyForm {
+            // The tracks and both corner arcs stay inside the icon's rounded clipping mask.
+            NSColor.monsterHex(style.shortRingColor).withAlphaComponent(0.12).setStroke(); Self.ringTracks[0].stroke()
+            NSColor.monsterHex(style.weekRingColor).withAlphaComponent(0.12).setStroke(); Self.ringTracks[1].stroke()
+            NSColor.monsterHex(style.shortRingColor).withAlphaComponent(0.72).setStroke(); shortRing?.stroke()
+            NSColor.monsterHex(style.weekRingColor).withAlphaComponent(0.52).setStroke(); weekRing?.stroke()
+        }
         // Unknown quota and old snapshots have an explicit neutral/stale marker, never a fake zero.
-        if remaining == nil || weekRemaining == nil || stale {
+        //
+        // 零钱罐形态下 remaining/weekRemaining 本来就是 nil（New API 没有百分比），
+        // 这不是「数据未知」，不能画问号——那会变成「零钱罐数据不明」，
+        // 而实际是额度来源没有这个口径。问号只在 blend 为 0 的 Codex 形态出现。
+        if blend <= 0.01 && (remaining == nil || weekRemaining == nil || stale) {
             let mark = stale ? "旧" : "?"
             context.saveGState()
             context.translateBy(x:18,y:18)

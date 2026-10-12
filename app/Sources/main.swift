@@ -119,6 +119,50 @@ func verify() throws {
     if codexSnapshot.isStale(now: Date(timeIntervalSince1970: 1_700_000_000 + 14 * 60)) { failures.append("Codex 14 分钟不应判陈旧") }
     if codexSnapshot.source != .codex { failures.append("快照来源判定错误") }
 
+    // 零钱罐形态语义。数值本身是设计建议（阈值待实测校准），
+    // 这里断言的是**结构关系**：档位越低硬币越少、笑越少。
+    for level in NewAPI.Prosperity.allCases {
+        let coins = MonsterView.coinCount(level), smile = MonsterView.smile(level)
+        if !(0...8).contains(coins) { failures.append("\(level.label) 硬币数越界：\(coins)") }
+        if !(0...1).contains(smile) { failures.append("\(level.label) 微笑程度越界：\(smile)") }
+    }
+    if MonsterView.coinCount(.abundant) <= MonsterView.coinCount(.comfortable)
+        || MonsterView.coinCount(.comfortable) <= MonsterView.coinCount(.tight)
+        || MonsterView.coinCount(.tight) <= MonsterView.coinCount(.drained) {
+        failures.append("硬币数必须随富足度递减")
+    }
+    if MonsterView.smile(.abundant) <= MonsterView.smile(.comfortable)
+        || MonsterView.smile(.comfortable) <= MonsterView.smile(.tight)
+        || MonsterView.smile(.tight) < MonsterView.smile(.drained) {
+        failures.append("微笑程度必须随富足度递增")
+    }
+    // 无消耗数据不画硬币：把「没有数据」画成 0 枚硬币等于说「一点钱都没有」。
+    if MonsterView.coinCount(.unknown) != 0 { failures.append("无消耗数据不应画硬币") }
+    if MonsterView.smile(.unknown) == MonsterView.smile(.abundant) {
+        failures.append("无消耗数据不应显示为满额微笑") }
+    // 零钱罐解剖坐标必须落在画布内，且眼睛、投币口、硬币堆互不重叠。
+    typealias Piggy = MonsterGeometry.PiggyAnatomy
+    if Piggy.coinCenter.y - Piggy.coinRadius <= 0 { failures.append("首枚硬币越出画布上沿") }
+    if Piggy.slot.y < Piggy.bodyTop || Piggy.slot.y > Piggy.bodyBottom {
+        failures.append("投币口必须落在身体纵向范围内") }
+    for (index, eye) in Piggy.eyes.enumerated() {
+        if eye.y < Piggy.bodyTop || eye.y + Piggy.eyeHeight > Piggy.bodyBottom {
+            failures.append("第 \(index + 1) 只眼越出身体纵向范围") }
+        // 眼睛不能被投币口或硬币堆盖住
+        let slotRight = Piggy.slot.x + Piggy.slot.width
+        let coinRight = Piggy.coinCenter.x + Piggy.coinColumnGap + Piggy.coinRadius
+        if eye.x < slotRight && eye.y < Piggy.slot.y + Piggy.slot.height {
+            failures.append("第 \(index + 1) 只眼与投币口重叠") }
+        if eye.x < coinRight && eye.y < Piggy.coinCenter.y + Piggy.coinRadius {
+            failures.append("第 \(index + 1) 只眼与硬币堆重叠") }
+    }
+    // 零钱罐轮廓本身要在画布内，且是闭合的实心形状。
+    if let top = MonsterGeometry.piggyPolygon.map(\.y).min(), top < 0 {
+        failures.append("零钱罐轮廓越出画布上沿：\(top)")
+    }
+    if MonsterGeometry.area(MonsterGeometry.piggyPolygon) <= 0 { failures.append("零钱罐轮廓面积为零") }
+    if MonsterGeometry.piggyPolygon.count < 20 { failures.append("零钱罐轮廓点数异常，疑似折线化失败") }
+
     // Keychain 往返。用独立的测试服务名，不碰 KeychainStore.Slot 的真实凭据槽——
     // 自检不得留下持久化副作用，也不得读取或覆盖用户已保存的访问令牌。
     let testService = "com.monsterpulse.selftest"
@@ -629,7 +673,7 @@ func verify() throws {
     if (realTokenBefore == nil) != (realTokenAfter == nil) {
         throw ReadError.message("自检不得改变真实凭据槽")
     }
-    print("PASS: quota parsing, missing/invalid/other buckets, New API wallet parsing, unit conversion, prosperity levels, CPU and memory sampling, window title and countdown formatting, dock menu structure, config clamping, quota alerts")
+    print("PASS: quota parsing, missing/invalid/other buckets, New API wallet parsing, unit conversion, prosperity levels, piggy bank anatomy, CPU and memory sampling, window title and countdown formatting, dock menu structure, config clamping, quota alerts")
 }
 
 if CommandLine.arguments.contains("--self-test") {
@@ -797,6 +841,28 @@ if CommandLine.arguments.contains("--monster-render-test") || CommandLine.argume
         (state == "time-zero" || state == "time-short" ? 0 : (state == "time-full" || state == "time-expired" || state == "time-week" ? 1 : 0.28))
     scene.shortTime = fixtureTime(minutes:300,fraction:shortFraction)
     scene.weekTime = fixtureTime(minutes:10080,fraction:weekFraction)
+    // 零钱罐夹具：piggy-<档位>，以及 piggy-leak（故意喂满时间窗口）。
+    if state.hasPrefix("piggy-") {
+        let key = String(state.dropFirst("piggy-".count))
+        scene.prosperity = key == "leak" ? .comfortable : (NewAPI.Prosperity(rawValue: key) ?? .comfortable)
+        scene.blend = 1
+        // New API 没有百分比，也没有时间窗口。这两项必须为 nil，
+        // 渲染层据此不画太阳与时间环——保留旧数值等于展示不存在的数据。
+        scene.remaining = nil
+        scene.weekRemaining = nil
+        scene.shortTime = MonsterTimeWindow(window: nil, now: fixtureNow)
+        scene.weekTime = MonsterTimeWindow(window: nil, now: fixtureNow)
+        // piggy-leak 故意把两个时间环喂满：若渲染层没有按形态屏蔽环，
+        // 这个夹具会和 piggy-comfortable 出现差异。语义检查据此断言
+        // 「零钱罐不画时间环」，而不是靠快照肉眼比对。
+        if key == "leak" {
+            let full = MonsterTimeWindow(window: QuotaWindow(used: 0, minutes: 300,
+                resetsAt: fixtureNow.addingTimeInterval(300*60)), now: fixtureNow)
+            scene.shortTime = full
+            scene.weekTime = MonsterTimeWindow(window: QuotaWindow(used: 0, minutes: 10080,
+                resetsAt: fixtureNow.addingTimeInterval(10080*60)), now: fixtureNow)
+        }
+    }
     let dockFixture = DockView(frame:scene.frame)
     dockFixture.monsterEnabled = true
     let dockScene = dockFixture.monster
@@ -804,6 +870,7 @@ if CommandLine.arguments.contains("--monster-render-test") || CommandLine.argume
     dockScene.remaining = scene.remaining; dockScene.weekRemaining = scene.weekRemaining
     dockScene.cpu = scene.cpu; dockScene.gpu = scene.gpu; dockScene.proxyEnabled = scene.proxyEnabled; dockScene.stale = scene.stale
     dockScene.shortTime = scene.shortTime; dockScene.weekTime = scene.weekTime
+    dockScene.prosperity = scene.prosperity; dockScene.blend = scene.blend
     if state.hasPrefix("motion-") { dockScene.style.motion = true; dockScene.phase = state == "motion-a" ? 0.4 : 0.9 }
     if state == "hidden-cpu" { dockScene.cpu = nil; dockScene.gpu = 0 }
     if state == "hidden-gpu" { dockScene.gpu = nil; dockScene.cpu = 0 }
@@ -827,6 +894,7 @@ if CommandLine.arguments.contains("--monster-render-test") || CommandLine.argume
         delegate.monster.weekRemaining = scene.weekRemaining; delegate.monster.cpu = scene.cpu; delegate.monster.gpu = scene.gpu
         delegate.monster.proxyEnabled = scene.proxyEnabled; delegate.monster.stale = scene.stale
         delegate.monster.shortTime = scene.shortTime; delegate.monster.weekTime = scene.weekTime
+        delegate.monster.prosperity = scene.prosperity; delegate.monster.blend = scene.blend
         delegate.monsterTimeReading.font = .systemFont(ofSize:12); delegate.monsterTimeReading.alignment = .center
         delegate.monsterTimeReading.textColor = .secondaryLabelColor
         delegate.monsterTimeReading.stringValue = scene.shortTime.text(title:"5h 外圈",now:fixtureNow)+"\n"+scene.weekTime.text(title:"周 内圈",now:fixtureNow)
@@ -1741,6 +1809,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             scene.cpu = config.showCPU ? dock.cpu : nil
             scene.gpu = config.showGPU ? dock.gpu : nil
             scene.proxyEnabled = network.proxyEnabled
+            // New API 来源走零钱罐形态：它没有百分比，所以 remaining/weekRemaining
+            // 都是 nil，太阳与时间环自然不画（渲染层由 nil 判断），只留硬币与弯眼。
+            scene.prosperity = snapshot?.newAPIWallet?.prosperity
+            scene.blend = snapshot?.newAPIWallet == nil ? 0 : 1
         }
         monster.needsDisplay = true
         dock.resetLabel = NetworkStatus.resetLabel(quota?.windows.first?.resetsAt)

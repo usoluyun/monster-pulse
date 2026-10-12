@@ -184,14 +184,110 @@ enum MonsterGeometry {
     }
     /// Binary search by contour area, rather than character height.
     static func cutoff(remaining: Double) -> Double {
-        let fraction = min(1,max(0,remaining))
-        if fraction == 0 { return 6 }; if fraction == 1 { return 41.01 }
-        var lower = 6.0, upper = 41.01
-        for _ in 0..<24 {
-            let middle = (lower+upper)/2
-            if whiteFraction(cutoff:middle) < fraction { lower = middle } else { upper = middle }
+        binaryCutoff(remaining: remaining, polygon: polygon, top: 6, bottom: 41.01)
+    }
+
+    /// 零钱罐轮廓（Notion §20.4 具象变形形态）。
+    ///
+    /// 刻意保持圆钝与偏侧不对称：§20.2 要求变形保持圆钝连续，识别仍靠
+    /// 轮廓与眼睛。**不画嘴、鼻子、耳朵**——靠「侧上耳状隆起 + 投币口 +
+    /// 硬币」读成零钱罐，而不是给角色加五官。投币口画在背脊偏侧，
+    /// 正中会被读成嘴。
+    static let piggyCommands: [Command] = [
+        .move(10.0, 34.0),
+        .curve(9.6, 28.0, 12.2, 23.4, 16.8, 21.2),
+        .curve(19.6, 19.9, 22.6, 19.4, 25.6, 19.2),
+        // 偏右上的耳状隆起，制造轻微不对称
+        .curve(27.6, 14.6, 32.4, 13.8, 35.4, 16.2),
+        .curve(39.2, 19.2, 40.6, 24.6, 40.4, 30.4),
+        .curve(40.2, 36.4, 36.8, 41.0, 30.6, 41.0),
+        .curve(23.0, 41.4, 14.6, 40.4, 11.4, 36.6),
+        .curve(10.4, 35.8, 10.1, 35.0, 10.0, 34.0),
+        .close,
+    ]
+
+    /// 零钱罐多边形，供面积与命中测试用。
+    static let piggyPolygon: [CGPoint] = flatten(piggyCommands)
+
+    /// 零钱罐形态下眼睛与投币口的位置。
+    ///
+    /// 换轮廓时必须同步换这两处：原轮廓的眼睛在 (20,17)/(26,17)、身体跨
+    /// y≈6…41，投币口画在 y≈18.6 会跑到身体外面，硬套旧坐标就是第一次渲染
+    /// 那个结果——白色形状浮在左上角，跟真正的身体完全脱开。
+    enum PiggyAnatomy {
+        /// 眼睛中心。零钱罐身体重心比原形低且偏右，眼睛跟着下移右移，
+        /// 保持在身体内部并维持双眼识别。
+        static let eyes: [(x: Double, y: Double)] = [(21.0, 29.0), (28.5, 28.4)]
+        static let eyeWidth = 4.2
+        static let eyeHeight = 6.4
+        /// 投币口：背脊**上缘**偏左的一段短横线。
+        ///
+        /// 放在上缘而不是身体中部，硬币才能自然地从口里「堆」出来；
+        /// 放中部会像身上一道装饰线，读不出投币动作。偏左避免被当成嘴。
+        static let slot: (x: Double, y: Double, width: Double, height: Double)
+            = (x: 13.8, y: 14.6, width: 10.2, height: 1.7)
+        /// 硬币堆起点（紧贴投币口上方第一枚的中心）。
+        static let coinCenter: (x: Double, y: Double) = (x: 16.6, y: 12.4)
+        /// 硬币层间距与半径。两列交错，排成一列会像装饰条。
+        ///
+        /// 间距必须容得下四层：最高档 8 枚 = 4 层 × 2 列。层高一旦被压到
+        /// 顶层硬币越出画布（见 drawPiggy 的越界跳过），丰足与充裕就会
+        /// 画出同样多的硬币，四档在视觉上塌成三档。
+        static let coinSpacing = 2.7
+        static let coinColumnGap = 3.2
+        static let coinRadius = 1.75
+        /// 身体在 48×48 坐标系里的纵向范围，用于夹具核对。
+        static let bodyTop = 13.8
+        static let bodyBottom = 41.4
+    }
+
+    /// 通用折线化，与 buildPolygon 同算法，只是换输入。
+    private static func flatten(_ commands: [Command]) -> [CGPoint] {
+        var points: [CGPoint] = []
+        var p = CGPoint.zero
+        for command in commands {
+            switch command {
+            case let .move(x, y): p = CGPoint(x: x, y: y); points.append(p)
+            case let .curve(x1, y1, x2, y2, x3, y3):
+                let origin = p
+                for i in 1...12 {
+                    let t = Double(i) / 12.0
+                    let u = 1.0 - t
+                    let x = u*u*u*origin.x + 3*u*u*t*x1 + 3*u*t*t*x2 + t*t*t*x3
+                    let y = u*u*u*origin.y + 3*u*u*t*y1 + 3*u*t*t*y2 + t*t*t*y3
+                    points.append(CGPoint(x: x, y: y))
+                }
+                p = CGPoint(x: x3, y: y3)
+            case .close: break
+            }
         }
-        return (lower+upper)/2
+        return points
+    }
+
+    /// 折线化缓存仅在启动时算一次，48×48 坐标系下每次约 100 个点。
+    private static func binaryCutoff(remaining: Double, polygon: [CGPoint],
+                                     top: Double, bottom: Double) -> Double {
+        let fraction = min(1, max(0, remaining))
+        if fraction == 0 { return top }
+        if fraction == 1 { return bottom }
+        var lower = top, upper = bottom
+        func white(_ cutoff: Double) -> Double {
+            var clipped: [CGPoint] = []
+            for i in polygon.indices {
+                let a = polygon[i], b = polygon[(i + 1) % polygon.count]
+                if a.y <= cutoff { clipped.append(a) }
+                if (a.y <= cutoff) != (b.y <= cutoff) {
+                    let t = (cutoff - a.y) / (b.y - a.y)
+                    clipped.append(CGPoint(x: a.x + t * (b.x - a.x), y: cutoff))
+                }
+            }
+            return area(clipped) / area(polygon)
+        }
+        for _ in 0..<24 {
+            let middle = (lower + upper) / 2
+            if white(middle) < fraction { lower = middle } else { upper = middle }
+        }
+        return (lower + upper) / 2
     }
 }
 

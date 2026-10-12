@@ -63,7 +63,7 @@ enum NewAPI {
     /// 刻意不用连续百分比：New API 钱包没有可信的固定周期分母
     /// （`quota + used_quota` 是历史消耗之和，不是周期预算），
     /// 做成百分比就会把「无限」和「100%」混为一谈。
-    enum Prosperity: String {
+    enum Prosperity: String, CaseIterable {
         case abundant, comfortable, tight, drained
         /// 有余额但无近期消耗，或余额非正——不能显示成 100% 或无限。
         case unknown

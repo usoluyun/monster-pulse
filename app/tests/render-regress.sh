@@ -105,7 +105,7 @@ SETTINGS_CASES=(
   "settings-newapi"
 )
 
-MONSTER_CASES=(normal 100 70 50 15 0 unknown stale cpu gpu off large custom motion-a motion-b idle hidden-cpu hidden-gpu time-zero time-full time-short time-week time-unknown time-zero-small time-full-small)
+MONSTER_CASES=(normal 100 70 50 15 0 unknown stale cpu gpu off large custom motion-a motion-b idle hidden-cpu hidden-gpu time-zero time-full time-short time-week time-unknown time-zero-small time-full-small piggy-abundant piggy-comfortable piggy-tight piggy-drained piggy-unknown piggy-abundant-small piggy-comfortable-small piggy-tight-small piggy-drained-small piggy-leak)
 mkdir -p "$BASE"
 if [ "${1:-}" = "--update" ] || [ "${1:-}" = "--update-dock" ] || [ "${1:-}" = "--update-ui" ]; then
   if [ "${1:-}" != "--update-ui" ]; then
