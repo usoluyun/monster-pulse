@@ -118,6 +118,22 @@ func verify() throws {
     if !codexSnapshot.isStale(now: Date(timeIntervalSince1970: 1_700_000_000 + 16 * 60)) { failures.append("Codex 16 分钟应判陈旧") }
     if codexSnapshot.isStale(now: Date(timeIntervalSince1970: 1_700_000_000 + 14 * 60)) { failures.append("Codex 14 分钟不应判陈旧") }
     if codexSnapshot.source != .codex { failures.append("快照来源判定错误") }
+
+    // Keychain 往返。用独立的测试服务名，不碰 KeychainStore.Slot 的真实凭据槽——
+    // 自检不得留下持久化副作用，也不得读取或覆盖用户已保存的访问令牌。
+    let testService = "com.monsterpulse.selftest"
+    defer { KeychainStore.delete(service: testService, account: "probe") }
+    if KeychainStore.read(service: testService, account: "probe") != nil { failures.append("测试槽读取前应为空") }
+    if !KeychainStore.save("secret-value", service: testService, account: "probe") { failures.append("Keychain 写入失败") }
+    if KeychainStore.read(service: testService, account: "probe") != "secret-value" { failures.append("Keychain 读取回值不一致") }
+    // 覆盖写：先删后写的路径必须走得通。
+    if !KeychainStore.save("second-value", service: testService, account: "probe") { failures.append("Keychain 覆盖写失败") }
+    if KeychainStore.read(service: testService, account: "probe") != "second-value" { failures.append("Keychain 覆盖写后回值不一致") }
+    if !KeychainStore.delete(service: testService, account: "probe") { failures.append("Keychain 删除失败") }
+    if KeychainStore.read(service: testService, account: "probe") != nil { failures.append("Keychain 删除后应读不到") }
+    // 真实访问令牌槽是否存在——供末尾「自检不得改变真实凭据槽」比对。
+    let realTokenBefore = KeychainStore.read(service: KeychainStore.Slot.service,
+                                             account: KeychainStore.Slot.accountToken)
     // 系统采样。CPU 忙碌率是「相邻两次采样的 tick 差值」，所以必须等计数器
     // 真的走格才有值。
     //
@@ -581,6 +597,13 @@ func verify() throws {
     let realConfigAfter = UserDefaults.standard.persistentDomain(forName: realDomain) as NSDictionary?
     if realConfigBefore != realConfigAfter {
         throw ReadError.message("自检不得改变真实配置域")
+    }
+    // 真实凭据槽同样不得被自检改动。这里只比「有没有」，不比内容——
+    // 读出用户令牌再放进内存就等于自检接触了凭据。
+    let realTokenAfter = KeychainStore.read(service: KeychainStore.Slot.service,
+                                            account: KeychainStore.Slot.accountToken)
+    if (realTokenBefore == nil) != (realTokenAfter == nil) {
+        throw ReadError.message("自检不得改变真实凭据槽")
     }
     print("PASS: quota parsing, missing/invalid/other buckets, New API wallet parsing, unit conversion, prosperity levels, CPU and memory sampling, window title and countdown formatting, dock menu structure, config clamping, quota alerts")
 }
