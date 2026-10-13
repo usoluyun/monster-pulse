@@ -378,6 +378,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private let newAPIAddressField = NSTextField(string: "")
     private let newAPITokenTitle = NSTextField(labelWithString: "访问令牌")
     private let newAPITokenField = NSSecureTextField(string: "")
+    private let pasteTokenButton = NSButton(title: "从剪贴板粘贴", target: nil, action: nil)
     private let newAPIStatus = NSTextField(wrappingLabelWithString: "")
     private let checkConnectionButton = NSButton(title: "检查连接", target: nil, action: nil)
     private let clearTokenButton = NSButton(title: "清除令牌", target: nil, action: nil)
@@ -547,7 +548,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         rows.append(Row(view: newAPIAddressField, height: 20, gapBefore: -17, width: nil))
 
         newAPITokenTitle.font = .systemFont(ofSize: 12)
-        // 安全输入框：令牌不在屏幕上以明文出现，也不进剪贴板历史。
+        // 安全输入框：令牌不在屏幕上以明文出现。
+        //
+        // ⚠️ 但它会**拒绝粘贴**来自其他安全字段的内容——macOS 的防肩窥设计。
+        // 令牌通常正是从密码管理器或安全输入框复制的，所以实测：
+        // 地址框（普通 NSTextField）能粘、令牌框能打字、唯独这个框不能粘。
+        // 因此额外提供「粘贴」按钮直接读剪贴板，绕过安全框的粘贴路径，
+        // 而显示仍然保持遮罩——这是保留遮罩又能用上的唯一办法。
         newAPITokenField.isEditable = true
         newAPITokenField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         refreshTokenState()
@@ -561,6 +568,10 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         content.addSubview(newAPITokenField)
         rows.append(Row(view: newAPITokenTitle, height: 17, gapBefore: 8, width: nil))
         rows.append(Row(view: newAPITokenField, height: 20, gapBefore: -17, width: nil))
+        pasteTokenButton.target = self
+        pasteTokenButton.action = #selector(pasteTokenFromClipboard)
+        content.addSubview(pasteTokenButton)
+        rows.append(Row(view: pasteTokenButton, height: 20, gapBefore: 5, width: nil))
 
         checkConnectionButton.target = self
         checkConnectionButton.action = #selector(checkNewAPIConnection)
@@ -602,6 +613,31 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         let hasToken = renderHasNewAPITokenOverride ?? config.hasNewAPIToken
         newAPITokenField.placeholderString = hasToken ? "已保存在钥匙串，留空则不修改" : "账户访问令牌"
         clearTokenButton.isEnabled = hasToken
+    }
+
+    /// 从剪贴板直接取文本填入令牌框。
+    ///
+    /// 存在的唯一理由是绕开 `NSSecureTextField` 的粘贴限制——它会拒绝来自
+    /// 其他安全字段的内容（macOS 防肩窥），而令牌基本都来自密码管理器或
+    /// 安全输入框。所以「⌘V 无效、打字有效」是这个控件的固有行为，
+    /// 不是配置或焦点问题（地址框能粘、令牌框能打字，都证明那两项正常）。
+    ///
+    /// 显示仍是遮罩：写进 `stringValue` 的内容由安全框自己遮住，不落到屏幕上。
+    @objc private func pasteTokenFromClipboard() {
+        let pb = NSPasteboard.general
+        // 依次尝试常见文本类型：密码管理器与浏览器不一定给 .string
+        var text: String?
+        for type in [NSPasteboard.PasteboardType.string, .init("public.utf8-plain-text"), .init("public.text")] {
+            if let value = pb.string(forType: type), !value.isEmpty { text = value; break }
+        }
+        guard let value = text?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            newAPIStatus.stringValue = "剪贴板里没有可用的文本。请确认复制的确实是令牌本身。"
+            NSSound.beep()
+            return
+        }
+        newAPITokenField.stringValue = value
+        // 填完直接落盘，不必再按一次回车——按钮本身就是明确的保存动作。
+        newAPITokenChanged()
     }
 
     @objc private func newAPITokenChanged() {
