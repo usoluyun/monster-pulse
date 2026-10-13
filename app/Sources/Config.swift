@@ -532,8 +532,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
         sourcePicker.selectedSegment = QuotaSource.allCases.firstIndex(of: config.quotaSource) ?? 0
         guard config.quotaSource == .newAPI else { return }
-        // 夹具可覆盖令牌已保存态，避免基线随机器状态漂移。
-        let hasToken = renderHasNewAPITokenOverride ?? config.hasNewAPIToken
         newAPIAddressField.stringValue = config.newAPIBaseURL
 
         newAPIAddressTitle.font = .systemFont(ofSize: 12)
@@ -552,9 +550,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         // 安全输入框：令牌不在屏幕上以明文出现，也不进剪贴板历史。
         newAPITokenField.isEditable = true
         newAPITokenField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        newAPITokenField.placeholderString = hasToken ? "已保存在钥匙串，留空则不修改" : "账户访问令牌"
+        refreshTokenState()
         newAPITokenField.target = self
         newAPITokenField.action = #selector(newAPITokenChanged)
+        // 只有按回车才保存。默认的 sendsActionOnEndEditing 会在失焦时也触发，
+        // 那意味着粘贴后随手点别处就把半截内容存进去了。
+        newAPITokenField.cell?.sendsActionOnEndEditing = false
+        selectAllOnFocus()
         content.addSubview(newAPITokenTitle)
         content.addSubview(newAPITokenField)
         rows.append(Row(view: newAPITokenTitle, height: 17, gapBefore: 8, width: nil))
@@ -567,7 +569,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
         clearTokenButton.target = self
         clearTokenButton.action = #selector(clearNewAPIToken)
-        clearTokenButton.isEnabled = hasToken
         content.addSubview(clearTokenButton)
         rows.append(Row(view: clearTokenButton, height: 22, gapBefore: 2, width: nil))
 
@@ -592,26 +593,58 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         newAPIAddressField.stringValue = config.newAPIBaseURL
     }
 
+    /// 令牌保存态的视觉表现。
+    ///
+    /// 单独抽出来，因为渲染夹具是在 init 之后才注入 `renderHasNewAPITokenOverride`
+    /// 的，而 buildRows() 在 init 里就跑过一次——不重刷就会用注入前的状态出图。
+    /// refreshControls() 由 renderToPNG 调用，这里也调，两处共用同一套判定。
+    private func refreshTokenState() {
+        let hasToken = renderHasNewAPITokenOverride ?? config.hasNewAPIToken
+        newAPITokenField.placeholderString = hasToken ? "已保存在钥匙串，留空则不修改" : "账户访问令牌"
+        clearTokenButton.isEnabled = hasToken
+    }
+
     @objc private func newAPITokenChanged() {
         let typed = newAPITokenField.stringValue
-        // 留空表示「不修改」：安全框无法回显已存令牌，
-        // 清空重输会逼用户每次打开设置都重打一遍。
-        guard !typed.isEmpty else {
-            newAPITokenField.stringValue = ""
-            return
+        guard !typed.isEmpty else { return }
+        let ok = KeychainStore.save(typed, service: KeychainStore.Slot.service,
+                                    account: KeychainStore.Slot.accountToken)
+        if ok {
+            // 保存后**不要清空输入框**。
+            //
+            // 之前保存完就把 stringValue 置空，而 NSTextField 的
+            // sendsActionOnEndEditing 默认 true——粘贴后再点一下别处就会触发
+            // action 并清空，用户看到空框，误以为粘贴没生效（实测反馈）。
+            // 安全框本身遮罩显示，留着不泄露；留着还能让「粘进去了」可见。
+            newAPITokenField.placeholderString = "已保存到钥匙串"
+            clearTokenButton.isEnabled = true
+            newAPIStatus.stringValue = "访问令牌已保存到钥匙串：不回显、不写偏好设置。再次粘贴会替换。"
+        } else {
+            newAPIStatus.stringValue = "保存失败：钥匙串写入被拒绝，可能缺少权限。"
         }
-        _ = KeychainStore.save(typed, service: KeychainStore.Slot.service,
-                               account: KeychainStore.Slot.accountToken)
-        newAPITokenField.stringValue = ""
-        newAPITokenField.placeholderString = "已保存在钥匙串，留空则不修改"
-        clearTokenButton.isEnabled = true
     }
 
     @objc private func clearNewAPIToken() {
         _ = KeychainStore.delete(service: KeychainStore.Slot.service,
                                  account: KeychainStore.Slot.accountToken)
+        newAPITokenField.stringValue = ""
         newAPITokenField.placeholderString = "账户访问令牌"
         clearTokenButton.isEnabled = false
+        newAPIStatus.stringValue = "已删除钥匙串中的访问令牌。"
+    }
+
+    /// 焦点进入时全选：再次粘贴是替换而不是追加。
+    ///
+    /// 保存后刻意保留了输入框内容（遮罩显示），所以不清空就得处理「再粘一次
+    /// 会追加」的问题。NSTextField 没有 focus 回调，用 didBecomeFirstResponder
+    /// 的字段编辑器通知来挂钩。
+    private func selectAllOnFocus() {
+        NotificationCenter.default.addObserver(
+            forName: NSControl.textDidBeginEditingNotification, object: newAPITokenField,
+            queue: .main) { [weak self] note in
+            guard let editor = note.object as? NSTextField else { return }
+            self?.newAPITokenField.currentEditor()?.selectAll(nil)
+        }
     }
 
     /// 「检查连接」在后台跑，界面先回「检查中…」再更新结果。
@@ -804,6 +837,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         proxyField.stringValue = config.proxyURL
         // 选中段不设的话，分段控件会把两项画成同一副样子——看着像没生效。
         sourcePicker.selectedSegment = QuotaSource.allCases.firstIndex(of: config.quotaSource) ?? 0
+        refreshTokenState()
         refreshLaunchControls()
         updateLabels()
     }

@@ -938,6 +938,15 @@ if CommandLine.arguments.contains("--settings-render-test") {
                                       alertResetLeadMinutes: base.alertResetLeadMinutes,
                                       alertFailureStreak: base.alertFailureStreak,
                                       diskAlertMBs: base.diskAlertMBs, proxyURL: base.proxyURL)
+    case "newapi-saved": config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
+                                      showCPU: base.showCPU, showMemory: base.showMemory, showGPU: base.showGPU, showDisk: base.showDisk,
+                                      alertsEnabled: base.alertsEnabled,
+                                      alertQuotaThreshold: base.alertQuotaThreshold,
+                                      alertResetLeadMinutes: base.alertResetLeadMinutes,
+                                      alertFailureStreak: base.alertFailureStreak,
+                                      diskAlertMBs: base.diskAlertMBs, proxyURL: base.proxyURL,
+                                      quotaSource: .newAPI,
+                                      newAPIBaseURL: "https://codingplan.at-our.com")
     case "newapi":     config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
                                       showCPU: base.showCPU, showMemory: base.showMemory, showGPU: base.showGPU, showDisk: base.showDisk,
                                       alertsEnabled: base.alertsEnabled,
@@ -968,7 +977,7 @@ if CommandLine.arguments.contains("--settings-render-test") {
     // 真实域里「已保存访问令牌」取决于这台机器之前填过没有，基线图
     // 不能跟着机器状态漂。强制置 false 让 newapi 夹具固定画未保存态。
     // 「令牌已保存」这一态由真机点验覆盖，不由基准图覆盖。
-    controller.renderHasNewAPITokenOverride = false
+    controller.renderHasNewAPITokenOverride = state == "newapi-saved" ? true : (state == "newapi" ? false : nil)
     // 自启状态一律钉死，不读系统真值。
     //
     // 不钉的话基线图会随「用户是否开启过自启」「跑的是 .build 还是

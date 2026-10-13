@@ -103,6 +103,7 @@ SETTINGS_CASES=(
   "settings-login-on"
   "settings-login-off"
   "settings-newapi"
+  "settings-newapi-saved"
 )
 
 MONSTER_CASES=(normal 100 70 50 15 0 unknown stale cpu gpu off large custom motion-a motion-b idle hidden-cpu hidden-gpu time-zero time-full time-short time-week time-unknown time-zero-small time-full-small piggy-abundant piggy-comfortable piggy-tight piggy-drained piggy-unknown piggy-abundant-small piggy-comfortable-small piggy-tight-small piggy-drained-small piggy-leak)
