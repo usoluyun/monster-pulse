@@ -65,6 +65,92 @@ struct QuotaCacheKey: Hashable {
     }
 }
 
+/// 来源无关的额度摘要。
+///
+/// Dock 图标大字、主窗口读数、详情窗口与右键菜单四处都要展示额度，
+/// 但两个来源能提供的东西完全不同：Codex 有百分比和两个时间窗口，
+/// New API 只有金额和富足度四档。把这四种展示收敛到一处，
+/// 免得每处各写一遍 if、其中一处漏改就在某个界面露出 Codex 的残留。
+struct QuotaSummary {
+    /// Dock 图标中央的大字。Codex 是剩余百分比数字，New API 是金额。
+    /// 为 nil 表示这一侧没有可展示的数字（例如 Codex 快照里没有窗口）。
+    /// 「%」不在这里：它与外圈同属百分比通道，视图靠「大字是否为 nil」判断来源。
+    let bigNumber: String?
+    /// 详情窗口与右键菜单逐行文案。
+    let detailLines: [String]
+    /// 来源标识，让用户随时知道看到的是哪个账户的数据。
+    let sourceLabel: String
+    /// 是否有任何可展示的数据。**不能**用 `quota != nil` 判断——
+    /// New API 模式下 quota 恒为 nil，那样会把有数据判成「暂无数据」。
+    let hasData: Bool
+
+    /// New API 的内容要独立成块，而不是塞进 Codex 的窗口行里。
+    var isWallet: Bool { sourceLabel != QuotaSource.codex.label }
+
+    /// 状态尾注。顺序与详情窗口一致：错误 > 过期。
+    ///
+    /// 有快照时**也要**带上 errorText：刷新失败但旧快照还在时，
+    /// 只说「旧数据」而不说「刚才查询失败」，用户会以为是自然过期。
+    /// 原实现直接丢弃 errorText，两处界面对同一次失败给出不同说法。
+    /// 没有快照时不说「旧数据」——根本没有旧数据。
+    private static func footer(errorText: String?, stale: Bool) -> [String] {
+        var lines: [String] = []
+        if let errorText { lines.append(errorText) }
+        if stale { lines.append("旧数据，仅供参考") }
+        return lines
+    }
+
+    static let empty = QuotaSummary(bigNumber: nil, detailLines: [],
+                                    sourceLabel: "", hasData: false)
+
+    static func of(_ snapshot: QuotaSnapshot?, loading: Bool = false,
+                   errorText: String? = nil, stale: Bool = false,
+                   now: Date = Date()) -> QuotaSummary {
+        guard let snapshot else {
+            var lines = [loading ? "正在查询…" : "暂无数据"]
+            if let errorText { lines.append(errorText) }
+            return QuotaSummary(bigNumber: nil, detailLines: lines,
+                                sourceLabel: "", hasData: false)
+        }
+        switch snapshot {
+        case .codex(let quota, _):
+            guard let window = quota.windows.first else { return .empty }
+            var lines = ["\(QuotaFormat.windowTitle(minutes: window.minutes))　剩余 \(window.remaining)%"]
+            if let reset = window.resetsAt.map({ QuotaFormat.countdown(to: $0, now: now) }) {
+                lines.append("　重置 \(reset)")
+            }
+            lines.append(contentsOf: footer(errorText: errorText, stale: stale))
+            return QuotaSummary(bigNumber: String(window.remaining),
+                                detailLines: lines, sourceLabel: QuotaSource.codex.label,
+                                hasData: !quota.windows.isEmpty)
+        case .newAPI(let wallet):
+            let symbol = wallet.site.currencySymbol
+            func money(_ quota: Int64) -> String {
+                wallet.site.amount(forQuota: quota)
+                    .map { "\(symbol)\(String(format: "%.2f", $0))" } ?? "原始额度 \(quota)"
+            }
+            var lines = ["账户余额　\(money(wallet.balance))　\(wallet.prosperity.label)"]
+            lines.append("近 24 小时消耗　\(money(wallet.dailyBurn ?? 0))")
+            // 预计可用天数是余额÷近 24h 消耗，单日抖动大，必须标注为估算。
+            if let days = wallet.runwayDays {
+                lines.append(String(format: "预计可用　%.1f 天（按近 24h 消耗估算）", days))
+            } else if wallet.balance > 0 {
+                // 没有消耗数据不等于无限，明确说「无近期用量」
+                lines.append("预计可用　无近期用量")
+            }
+            if let subscription = wallet.activeSubscription {
+                lines.append("套餐剩余　\(String(format: "%.0f%%", (subscription.remainingFraction ?? 0) * 100))")
+            }
+            lines.append(contentsOf: footer(errorText: errorText, stale: stale))
+            // Dock 大字：43pt 下数字比「充裕」可读，信息也更准；档位由硬币表达。
+            let big = wallet.site.amount(forQuota: wallet.balance)
+                .map { "\(symbol)\(String(format: "%.0f", $0))" }
+            return QuotaSummary(bigNumber: big, detailLines: lines,
+                                sourceLabel: QuotaSource.newAPI.label, hasData: true)
+        }
+    }
+}
+
 /// 来源快照的统一外壳。
 ///
 /// 两个来源的载荷类型不同，这里只统一「采集时刻」这一项——

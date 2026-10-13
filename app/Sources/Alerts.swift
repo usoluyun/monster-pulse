@@ -33,9 +33,19 @@ enum AlertMonitor {
     /// 判断当前应处于「活跃」的预警集合。所有实现细节（去重、跃迁检测）
     /// 都在这里，便于脱离 AppKit 测试。
     static func activeAlerts(windows: [Window], failureStreak: Int, diskReadMBs: Double?,
-                              config: Config, now: Date = Date()) -> Set<String> {
+                              config: Config, now: Date = Date(),
+                              prosperity: NewAPI.Prosperity? = nil) -> Set<String> {
         guard config.alertsEnabled else { return [] }
         var active = Set<String>()
+
+        // New API 的钱包预警。原先只判 windows，而 New API 模式下 windows
+        // 恒为空——于是「快没钱了」永远不会提醒，与用户的直觉相反。
+        // 阈值用四档档位而不是百分比：New API 没有可信的周期分母，
+        // 把预计可用天数换算成百分比等于伪造一个分母。
+        if let prosperity {
+            if prosperity == .drained { active.insert("wallet-drained") }
+            else if prosperity == .tight { active.insert("wallet-tight") }
+        }
 
         // 额度阀值只看第一个有效窗口（Dock 图标显示的就是它）。
         // 多窗口都判一遍会让每周窗口在正常使用时也报警，噪音太大。
@@ -63,8 +73,15 @@ enum AlertMonitor {
 
     /// 为新进入 active 的条目生成文案。
     static func message(for key: String, windows: [Window], failureStreak: Int,
-                        diskReadMBs: Double? = nil, config: Config, now: Date = Date()) -> Alert {
+                        diskReadMBs: Double? = nil, config: Config, now: Date = Date(),
+                        wallet: String? = nil) -> Alert {
         switch key {
+        case "wallet-drained":
+            return Alert(key: key, title: "钱包见底",
+                         body: "\(wallet ?? "账户余额")，预计可用已不足 1 天或余额为零")
+        case "wallet-tight":
+            return Alert(key: key, title: "钱包拮据",
+                         body: "\(wallet ?? "账户余额")，预计可用已不足 7 天")
         case "low-quota":
             let remaining = windows.first?.remaining ?? 0
             return Alert(key: key, title: "额度偏低",
@@ -98,15 +115,18 @@ enum AlertMonitor {
         private var active = Set<String>()
 
         func update(windows: [Window], failureStreak: Int, diskReadMBs: Double?, config: Config,
-                    now: Date = Date()) -> [Alert] {
+                    now: Date = Date(), prosperity: NewAPI.Prosperity? = nil,
+                    walletText: String? = nil) -> [Alert] {
             let current = AlertMonitor.activeAlerts(windows: windows, failureStreak: failureStreak,
-                                                    diskReadMBs: diskReadMBs, config: config, now: now)
+                                                    diskReadMBs: diskReadMBs, config: config, now: now,
+                                                    prosperity: prosperity)
             // 先算文案再替换状态：message() 依赖的是本次数据
             let fresh = current.subtracting(active)
             let alerts = fresh
                 .sorted()   // 固定顺序，便于测试断言
                 .map { AlertMonitor.message(for: $0, windows: windows, failureStreak: failureStreak,
-                                            diskReadMBs: diskReadMBs, config: config, now: now) }
+                                            diskReadMBs: diskReadMBs, config: config, now: now,
+                                            wallet: walletText) }
             active = current
             return alerts
         }
@@ -119,9 +139,10 @@ enum AlertMonitor {
         /// 注意这与「清空记录」是相反的操作：清空会让下一次 update 把当前所有
         /// 条件当成新跃迁，从而立刻触发。混用这两个语义会漏预警或多预警。
         func suppress(windows: [Window], failureStreak: Int, diskReadMBs: Double?, config: Config,
-                      now: Date = Date()) {
+                      now: Date = Date(), prosperity: NewAPI.Prosperity? = nil) {
             active = AlertMonitor.activeAlerts(windows: windows, failureStreak: failureStreak,
-                                                diskReadMBs: diskReadMBs, config: config, now: now)
+                                                diskReadMBs: diskReadMBs, config: config, now: now,
+                                                prosperity: prosperity)
         }
 
         /// 清空跃迁记录。**下次 update 会把当前所有条件当成新跃迁。**

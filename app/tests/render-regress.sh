@@ -62,6 +62,16 @@ CASES=(
   "gpu-full:62:0:none:both:gpu=1,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
   "zero-load:62:0:none:both:memory=0,read=0,write=0,gpu=0,rail=0.35/0.42,rail2=0.12/0.30,country=US,proxy=on,reset=10800"
   "network-off:62:0.12:none:both:gpu=1,rail=0.38/0.45,rail2=0.26/0.32,country=CN,proxy=off,reset=1800"
+  # New API 来源。remaining 恒 nil（该来源没有百分比），wallet= 注入 Dock 大字
+  # 并关掉外圈。这两条用例锁的是「New API 不得出现 Codex 残留」：
+  # 曾用 remaining != nil 推断来源，于是 no-quota 的空圈整个消失；
+  # 曾给大字加 displaySuffix，夹具不设它时「%」也没了。两者都由这组锁住。
+  # 刻意不给 reset=：该来源没有重置倒计时，render() 里取的是
+  # quota?.windows.first?.resetsAt，恒 nil。夹具比现实多显示的东西不是保护。
+  "wallet-1721:nil:0.42:none:both:gpu=0.12,country=US,proxy=on,wallet=¥1721"
+  "wallet-short:nil:0.10:none:both:gpu=0.98,country=US,proxy=on,wallet=¥86"
+  # 余额位数变多时字号必须跟着缩，否则会画出版心宽度之外。
+  "wallet-5digits:nil:0.42:none:both:gpu=0.12,country=US,proxy=on,wallet=¥12345"
   "network-unknown:62:0.12:none:both:gpu=1,rail=0.38/0.45,rail2=0.26/0.32,proxy=unknown"
   "quota-empty:0:0:none:both:gpu=0,country=US,proxy=on"
   "quota-full:100:0:none:both:gpu=0,country=US,proxy=on"
@@ -89,6 +99,7 @@ DETAILS_CASES=(
   "details-normal-no-meters"
   "details-no-data-no-meters"
   "details-no-gpu"
+  "details-wallet"
 )
 
 # 设置面板的用例。此前设置窗口没有渲染入口，新增控件是否被挤出可视区、
