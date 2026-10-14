@@ -46,7 +46,7 @@ final class MonsterView: NSView {
     var gpu: Double?
     var proxyEnabled: Bool?
     var stale = false
-    /// New API 富足度。非 nil 时启用零钱罐形态与弯眼微笑。
+    /// New API 富足度。非 nil 时启用零钱罐形态。
     var prosperity: NewAPI.Prosperity?
     /// 零钱罐形态与原轮廓的混合比例 0...1。1 为完全零钱罐。
     var blend = 0.0
@@ -66,132 +66,188 @@ final class MonsterView: NSView {
         return path
     }
     private static let body = path(MonsterGeometry.commands)
-    /// 零钱罐形态轮廓。仅在 New API 来源下使用。
     private static let piggyBody = path(MonsterGeometry.piggyCommands)
-    /// 零钱罐形态下的硬币数量。四档富足度各配一个可辨识的数量，
-    /// 让「剩多少钱」在 43pt 下也能读出量级差别，而不是只靠颜色。
+
+    /// 各摞硬币枚数（左→右）。枚数是示意，不对应真实货币单位。
     ///
-    /// 注意这表达的是**绝对金额**（每枚代表一个固定额度档），不是百分比：
-    /// New API 没有可信的周期分母，做成百分比等于伪造。金额档位阈值待实测校准。
-    static func coinCount(_ prosperity: NewAPI.Prosperity) -> Int {
+    /// 构图对齐 Notion 范例：富足三高摞、充裕中等、捉襟一小摞、见底一枚。
+    static func coinStacks(_ prosperity: NewAPI.Prosperity) -> [Int] {
         switch prosperity {
-        case .abundant: return 8
-        case .comfortable: return 6
-        case .tight: return 4
-        case .drained: return 2
-        case .unknown: return 0
+        case .abundant: return [5, 6, 4]
+        case .comfortable: return [3, 4, 2]
+        case .tight: return [2]
+        case .drained: return [1]
+        case .unknown: return []
         }
     }
 
-    /// 富足度 → 微笑程度 0...1。
-    ///
-    /// §20.2 禁止嘴、鼻、耳，所以「微笑」只能落在眼形上：
-    /// §20.3 已认可 happy 用「向上弯起的弯眼」，这里复用同一条通道，
-    /// 不新增任何面部结构。
+    /// 硬币总数（含前景散币）。供自检单调性；绘制以 `coinStacks` 为准。
+    static func coinCount(_ prosperity: NewAPI.Prosperity) -> Int {
+        let stacks = coinStacks(prosperity).reduce(0, +)
+        switch prosperity {
+        case .abundant: return stacks + 2
+        case .comfortable: return stacks + 1
+        case .tight: return stacks + 1
+        default: return stacks
+        }
+    }
+
+    /// 嘴张开程度 0...1（范例：哈哈 / 微笑 / 忧伤 / 咬牙）。
+    /// 越大嘴越开；见底为 0（闭口咬牙）。
     static func smile(_ prosperity: NewAPI.Prosperity) -> Double {
         switch prosperity {
         case .abundant: return 1.0
-        case .comfortable: return 0.78
-        case .tight: return 0.5
+        case .comfortable: return 0.55
+        case .tight: return 0.28
         case .drained: return 0.0
-        case .unknown: return 0.5
+        case .unknown: return 0.25
         }
     }
 
     override func draw(_ dirtyRect: NSRect) { drawScene(in: bounds) }
 
-    /// 眼睛。`prosperity` 为 nil 时是 Codex 的竖椭圆眼；
-    /// 非 nil 时按微笑程度把上缘向上弯——§20.2 禁止嘴鼻耳，
-    /// 「微笑」只能走 §20.3 已认可的弯眼通道。
+    /// 眼睛。Codex 为竖椭圆；零钱罐为简洁竖眼（表情交给嘴）。
     private func drawEyes(in context: CGContext, prosperity: NewAPI.Prosperity?) {
         let bodyColor = NSColor.monsterHex((remaining ?? 0) < 40 ? style.usedColor : style.remainingColor)
         let rgb = bodyColor.usingColorSpace(.sRGB) ?? .white
         let light = rgb.redComponent*0.2126 + rgb.greenComponent*0.7152 + rgb.blueComponent*0.0722
         (light > 0.5 ? NSColor.monsterHex("#171b21") : .white).setFill()
-        // 零钱罐形态的眼睛位置与原形不同，硬套原坐标会让眼睛掉出身体。
         typealias Anatomy = MonsterGeometry.PiggyAnatomy
         let eyes: [(x: Double, y: Double)] = prosperity == nil ? [(20, 17), (26, 17)] : Anatomy.eyes
         let eyeWidth = prosperity == nil ? 4.0 : Anatomy.eyeWidth
         let eyeHeight = prosperity == nil ? 8.0 : Anatomy.eyeHeight
-        for (index, eye) in eyes.enumerated() {
-            let x = eye.x, y0 = eye.y
-            guard let prosperity else {
-                NSBezierPath(roundedRect: NSRect(x: x, y: y0, width: eyeWidth, height: eyeHeight),
-                             xRadius: 2, yRadius: 2).fill()
-                continue
-            }
-            let amount = Self.smile(prosperity)
-            let y1 = y0 + eyeHeight, w = eyeWidth
-            // 弯度：0 为竖椭圆（与 Codex 眼一致），1 为明显上弯的弯眼。
-            //
-            // 上缘向上拱、下缘压平，两者同时随 amount 变化——只弯一条边会读成
-            // 「眼睛歪了」，两条边一起弯才是「眯眼笑」。两只眼按 index 轻微
-            // 错开，避免整排弯眼看着像机械复制。
-            let skew = amount * (index == 0 ? 1.0 : 0.86)
-            let rise = eyeHeight * 0.62 * skew
-            let path = NSBezierPath()
-            path.move(to: NSPoint(x: x, y: y0))
-            // 下缘：由中间高点回落到两端，弧顶高度随笑度上升
-            path.curve(to: NSPoint(x: x + w, y: y0),
-                       controlPoint1: NSPoint(x: x + w*0.18, y: y0 + rise*0.92),
-                       controlPoint2: NSPoint(x: x + w*0.82, y: y0 + rise*0.92))
-            // 上缘：由两端拱到中间，与下缘合成弧形而非斜块
-            path.curve(to: NSPoint(x: x, y: y1),
-                       controlPoint1: NSPoint(x: x + w*0.82, y: y1 + rise*0.55),
-                       controlPoint2: NSPoint(x: x + w*0.18, y: y1 + rise*0.55))
-            path.close()
-            path.fill()
+        for eye in eyes {
+            let h = prosperity == .tight ? eyeHeight * 0.72 : eyeHeight
+            let y = prosperity == .tight ? eye.y + eyeHeight * 0.14 : eye.y
+            // Codex 圆角保持 2.0（基线锁定）；零钱罐略尖一点以配嘴口比例。
+            let radius: CGFloat = prosperity == nil ? 2.0 : 1.8
+            NSBezierPath(roundedRect: NSRect(x: eye.x, y: y, width: eyeWidth, height: h),
+                         xRadius: radius, yRadius: radius).fill()
         }
     }
 
-    /// 零钱罐形态。仅在 New API 来源且拿到钱包时绘制。
-    ///
-    /// 单独一层而不是替换身体：§20.4 要求「身体连续重塑为物品」，
-    /// 但那只描述造型意图；实际绘制上，形态之间不应该出现跳变，
-    /// 否则切来源的瞬间会闪一下。所以这里的零钱罐与原轮廓是**叠加**
-    /// 在同一坐标里，形态切换留给后续的变形动画，中间态由 blend 控制。
+    /// 嘴即投币口。范例四档：哈哈 / 微笑 / 忧伤 / 闭口咬牙。
+    private func drawMouth(prosperity: NewAPI.Prosperity) {
+        typealias Anatomy = MonsterGeometry.PiggyAnatomy
+        let base = Anatomy.mouth
+        let open = Self.smile(prosperity)
+        NSColor.monsterHex("#171b21").setFill()
+        switch prosperity {
+        case .drained:
+            // 闭口咬牙：细横线 + 两道短齿痕
+            let line = NSBezierPath(roundedRect: NSRect(x: base.cx - base.width*0.42,
+                                                        y: base.cy - 0.45,
+                                                        width: base.width*0.84, height: 0.9),
+                                    xRadius: 0.45, yRadius: 0.45)
+            line.fill()
+            NSColor.monsterHex("#171b21").withAlphaComponent(0.55).setFill()
+            for dx in [-2.0, 2.0] {
+                NSBezierPath(roundedRect: NSRect(x: base.cx + dx - 0.4, y: base.cy - 1.45,
+                                                 width: 0.8, height: 1.25),
+                             xRadius: 0.25, yRadius: 0.25).fill()
+            }
+        case .tight:
+            // 忧伤：向下弯的短弧
+            let path = NSBezierPath()
+            let w = base.width * 0.72, h = 1.85
+            path.move(to: NSPoint(x: base.cx - w/2, y: base.cy - 0.35))
+            path.curve(to: NSPoint(x: base.cx + w/2, y: base.cy - 0.35),
+                       controlPoint1: NSPoint(x: base.cx - w*0.2, y: base.cy + h),
+                       controlPoint2: NSPoint(x: base.cx + w*0.2, y: base.cy + h))
+            path.curve(to: NSPoint(x: base.cx - w/2, y: base.cy - 0.35),
+                       controlPoint1: NSPoint(x: base.cx + w*0.15, y: base.cy + h*0.4),
+                       controlPoint2: NSPoint(x: base.cx - w*0.15, y: base.cy + h*0.4))
+            path.close()
+            path.fill()
+        case .abundant, .comfortable, .unknown:
+            // 微笑 / 哈哈：圆钝开口；张开度随 open，哈哈明显更大
+            let w = base.width * (0.8 + open*0.35)
+            let h = base.height * (0.5 + open*1.15)
+            let oval = NSBezierPath(ovalIn: NSRect(x: base.cx - w/2, y: base.cy - h*0.4,
+                                                   width: w, height: h))
+            oval.fill()
+            // 罐内暗部：让开口读得出「通到肚子」
+            NSColor.monsterHex("#2a2118").withAlphaComponent(0.5 + open*0.35).setFill()
+            NSBezierPath(ovalIn: NSRect(x: base.cx - w*0.34, y: base.cy - h*0.08,
+                                        width: w*0.68, height: h*0.62)).fill()
+        }
+    }
+
+    /// 立体硬币：侧边厚度 + 椭圆顶面；少量银色点缀。
+    private func drawCoin(at cx: Double, cy: Double, silver: Bool) {
+        typealias Anatomy = MonsterGeometry.PiggyAnatomy
+        let rx = Anatomy.coinRadiusX, ry = Anatomy.coinRadiusY
+        // 侧边厚度
+        NSColor.monsterHex(silver ? "#7a828c" : "#8f6f24").setFill()
+        NSBezierPath(ovalIn: NSRect(x: cx - rx, y: cy - ry*0.2, width: rx*2, height: ry*1.7)).fill()
+        // 顶面
+        NSColor.monsterHex(silver ? "#c5ccd4" : "#e2b95f").setFill()
+        NSBezierPath(ovalIn: NSRect(x: cx - rx, y: cy - ry, width: rx*2, height: ry*2)).fill()
+        // 高光点
+        NSColor.white.withAlphaComponent(0.28).setFill()
+        NSBezierPath(ovalIn: NSRect(x: cx - rx*0.45, y: cy - ry*0.55,
+                                    width: rx*0.55, height: ry*0.55)).fill()
+        NSColor.monsterHex("#171b21").withAlphaComponent(0.25).setStroke()
+        let rim = NSBezierPath(ovalIn: NSRect(x: cx - rx, y: cy - ry, width: rx*2, height: ry*2))
+        rim.lineWidth = 0.35
+        rim.stroke()
+    }
+
+    /// 零钱罐形态（Notion 范例）：圆罐 + 嘴口 + 透明腹 + 立体币堆。
     private func drawPiggy(in context: CGContext) {
-        // 调用方已处于角色变换内（与原身体同一坐标），这里不要再做定位。
         guard let prosperity else { return }
         context.saveGState()
-        // 从原形「长」成零钱罐：以身体底边中心为锚点轻微放大，
-        // 让形态变化看起来是生长而不是贴图切换。
         let grow = 1 + (1-blend)*0.06
         context.translateBy(x: 24.5, y: 41)
         context.scaleBy(x: blend*grow, y: blend*grow)
         context.translateBy(x: -24.5, y: -41)
 
         typealias Anatomy = MonsterGeometry.PiggyAnatomy
-        let color = NSColor.monsterHex(style.remainingColor)
-        color.setFill()
+        let shell = NSColor.monsterHex(style.remainingColor)
+        shell.setFill()
         Self.piggyBody.fill()
 
-        // 投币口：画在背脊上缘偏左，居中会被读成嘴。
-        NSColor.monsterHex("#171b21").withAlphaComponent(0.45).setFill()
-        NSBezierPath(roundedRect: NSRect(x: Anatomy.slot.x, y: Anatomy.slot.y,
-                                        width: Anatomy.slot.width, height: Anatomy.slot.height),
-                     xRadius: Anatomy.slot.height/2, yRadius: Anatomy.slot.height/2).fill()
+        // 透明腹：大腹窗 + 深内壁，钱在「里面」。
+        context.saveGState()
+        Self.piggyBody.addClip()
+        let b = Anatomy.bellyRect
+        let belly = NSBezierPath(ovalIn: NSRect(x: b.x, y: b.y, width: b.width, height: b.height))
+        belly.addClip()
+        NSColor.monsterHex("#141a20").withAlphaComponent(0.55).setFill()
+        NSRect(x: b.x - 1, y: b.y, width: b.width + 2, height: b.height + 1).fill()
+        // 玻璃高光带：强调透明材质
+        NSColor.white.withAlphaComponent(0.08).setFill()
+        NSBezierPath(ovalIn: NSRect(x: b.x + 2, y: b.y + 1.2, width: b.width*0.42, height: 3.2)).fill()
 
-        // 硬币：表达绝对金额的数量，不表达百分比。
-        let coins = Self.coinCount(prosperity)
-        if coins > 0 {
-            let rgb = color.usingColorSpace(.sRGB) ?? .white
-            let light = rgb.redComponent*0.2126 + rgb.greenComponent*0.7152 + rgb.blueComponent*0.0722
-            NSColor.monsterHex(light > 0.5 ? "#c9a34b" : "#e2b95f").setFill()
-            NSColor.monsterHex("#171b21").withAlphaComponent(0.3).setStroke()
-            // 自投币口向上堆，两列交错；硬币不得超出 48×48 画布上沿，
-            // 超出就跳过而不是画到图标外面。
-            for i in 0..<coins {
-                let column = i % 2, rank = i / 2
-                let cx = Anatomy.coinCenter.x + Double(column)*Anatomy.coinColumnGap
-                let cy = Anatomy.coinCenter.y - Double(rank)*Anatomy.coinSpacing
-                guard cy - Anatomy.coinRadius > 1 else { continue }
-                let coin = NSBezierPath(ovalIn: NSRect(x: cx - Anatomy.coinRadius, y: cy - Anatomy.coinRadius,
-                                            width: Anatomy.coinRadius*2, height: Anatomy.coinRadius*2))
-                coin.lineWidth = 0.35
-                coin.fill(); coin.stroke()
+        let stacks = Self.coinStacks(prosperity)
+        for (index, count) in stacks.enumerated() {
+            guard index < Anatomy.stackCentersX.count else { continue }
+            let cx = Anatomy.stackCentersX[index]
+            for rank in 0..<count {
+                let cy = Anatomy.stackBaseY - Double(rank) * Anatomy.coinLift
+                guard cy - Anatomy.coinRadiusY > Anatomy.bellyTop + 0.5 else { continue }
+                drawCoin(at: cx + (rank % 2 == 0 ? -0.3 : 0.35), cy: cy,
+                         silver: rank > 0 && rank % 3 == 0)
             }
         }
+        // 前景散币
+        if prosperity == .abundant {
+            drawCoin(at: 13.6, cy: 41.0, silver: false)
+            drawCoin(at: 34.2, cy: 40.4, silver: true)
+        } else if prosperity == .comfortable {
+            drawCoin(at: 14.4, cy: 40.8, silver: false)
+        } else if prosperity == .tight {
+            drawCoin(at: 28.5, cy: 40.5, silver: false)
+        }
+        context.restoreGState()
+
+        // 腹缘描边，强调「窗」
+        NSColor.monsterHex("#171b21").withAlphaComponent(0.18).setStroke()
+        let rim = NSBezierPath(ovalIn: NSRect(x: b.x, y: b.y, width: b.width, height: b.height))
+        rim.lineWidth = 0.7
+        rim.stroke()
+
+        drawMouth(prosperity: prosperity)
         context.restoreGState()
     }
     func drawScene(in rect: NSRect) {

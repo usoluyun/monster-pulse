@@ -38,7 +38,7 @@
 
 ## M3 · New API 用量接入（已实现，验收中）
 
-> 2026-10-14 注：**Provider Profile（方案 B）** 已落地——见 `ProviderProfile.swift` 与 [m3-settings-ia-todo.md](m3-settings-ia-todo.md)。D1（[PR #1](https://github.com/usoluyun/monster-pulse/pull/1) Actions 绿）与 D2（Dock/Finder：Codex 代理刷新、New API 检查连接、来源切换不串台）均已完成。合并 PR 后可将 GitHub milestone 标为关闭。
+> 2026-10-14 注：**Provider Profile（方案 B）** 已落地——见 `ProviderProfile.swift` 与 [m3-settings-ia-todo.md](m3-settings-ia-todo.md)。D1（[PR #1](https://github.com/usoluyun/monster-pulse/pull/1) Actions 绿）与 D2（Dock/Finder：Codex 代理刷新、New API 检查连接、来源切换不串台）均已完成。同日分支 `m3-wallet-visual`：零钱罐对齐 Notion（嘴口/透明腹/立体币堆/四档表情）+ Dock 钱包读数卡（金额 + 档位次行）；`--self-test` 与 `render-regress` 93/93 绿。合并后可将 GitHub milestone 标为关闭。
 
 目标：用户配置自己的 New API 服务后，查看模型消耗、剩余额度及其来源，并可作为 Dock / Monster 的额度来源。
 

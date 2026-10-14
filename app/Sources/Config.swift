@@ -357,9 +357,17 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     private static let sliderWidth: CGFloat = 150
     private static let windowWidth: CGFloat = 400
     private static let bottomBar: CGFloat = 48
+    /// 窗口相对屏幕可视区再留一点空，避免贴满菜单栏 / Dock。
+    private static let screenMargin: CGFloat = 64
+    private static let minWindowHeight: CGFloat = 520
 
     private let window: NSWindow
+    /// 窗口根视图：上方可滚动正文 + 下方固定底栏。
+    private let rootView = NSView()
+    private let scrollView = NSScrollView()
+    /// 正文（documentView）。New API 配置段很长时整窗会超过屏幕，靠滚动看全。
     private let content = NSView()
+    private let footer = NSView()
     private var rows: [Row] = []
     private var config: Config
     private let onChange: (Config) -> Void
@@ -441,17 +449,45 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
                                                 target: nil, action: nil)
 
     init(config: Config, onChange: @escaping (Config) -> Void,
-         onQuotaSourceChanged: @escaping (QuotaSource) -> Void = { _ in }) {
+         onQuotaSourceChanged: @escaping (QuotaSource) -> Void = { _ in },
+         renderHasNewAPITokenOverride: Bool? = nil) {
         self.config = config
         self.onChange = onChange
         self.onQuotaSourceChanged = onQuotaSourceChanged
+        // 必须在 buildRows() 之前钉死：refreshTokenState 会读 Keychain，
+        // 夹具若事后才注入，init 里那一次已经可能卡在 securityd 上。
+        self.renderHasNewAPITokenOverride = renderHasNewAPITokenOverride
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: Self.windowWidth, height: 480),
                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
         super.init()
         window.title = "Monster Pulse 设置"
         window.isReleasedWhenClosed = false
         window.delegate = self
+        installChrome()
         buildRows()
+    }
+
+    /// 根视图：滚动正文 + 固定底栏。只装一次；`rebuildRows` 只清正文。
+    private func installChrome() {
+        rootView.wantsLayer = true
+        window.contentView = rootView
+
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        scrollView.documentView = content
+        rootView.addSubview(scrollView)
+        rootView.addSubview(footer)
+
+        let reset = NSButton(title: "恢复默认", target: self, action: #selector(resetToDefaults))
+        let monsterButton = NSButton(title: "Monster 外观…", target: self,
+                                     action: #selector(openMonsterAppearance))
+        footer.addSubview(reset)
+        footer.addSubview(monsterButton)
+        resetButton = reset
+        monsterAppearanceButton = monsterButton
     }
 
     // MARK: 行构建
@@ -482,9 +518,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     private func buildRows() {
         content.wantsLayer = true
-        let monsterButton = NSButton(title: "Monster 外观…", target: self, action: #selector(openMonsterAppearance))
-        monsterAppearanceButton = monsterButton
-        content.addSubview(monsterButton)
         append(heading("刷新频率"), height: 15, gapBefore: 0)
         appendSlider(systemLabel, systemSlider, height: 17, gapBefore: 10)
         appendSlider(quotaLabel, quotaSlider, height: 17, gapBefore: 8)
@@ -507,12 +540,6 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         buildNetworkRows()
         buildLaunchRows()
 
-        let reset = NSButton(title: "恢复默认", target: self, action: #selector(resetToDefaults))
-        content.addSubview(reset)
-        resetButton = reset
-
-        content.frame = NSRect(x: 0, y: 0, width: Self.windowWidth, height: 1)
-        window.contentView = content
         layoutRows()
         refreshControls()
     }
@@ -828,8 +855,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// 窗口高度 = 内容高 + 上下留白 + 底部按钮条。
-    /// 滑杆行不额外计高也不额外计 gap（它的 height 已含在标签行里）。
+    /// 正文档高度（不含底栏）。滑杆行不额外计高也不额外计 gap。
     private var contentHeight: CGFloat {
         rows.reduce(0) { total, row in
             let gap = row.gapBefore > 0 ? row.gapBefore : 0
@@ -837,40 +863,67 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         }
     }
 
-    /// 按内容高度调整窗口。
+    /// 整窗理想高度 = 正文 + 上下留白 + 底栏。
+    private var idealWindowHeight: CGFloat {
+        contentHeight + Self.inset * 2 + Self.bottomBar
+    }
+
+    /// 真机显示时按屏幕可视区封顶；离屏渲染默认不封顶，好把全部控件画进基线。
+    /// `MP_SETTINGS_MAX_HEIGHT` 可强制封顶（回归里用来断言「可滚动」真生效）。
+    private var maxWindowHeight: CGFloat {
+        if let raw = ProcessInfo.processInfo.environment["MP_SETTINGS_MAX_HEIGHT"],
+           let value = Double(raw), value > 0 {
+            return CGFloat(value)
+        }
+        if renderAppearance != nil { return 10_000 }
+        let visible = (window.screen ?? NSScreen.main)?.visibleFrame.height ?? 900
+        return max(Self.minWindowHeight, visible - Self.screenMargin)
+    }
+
+    /// 按内容高度调整窗口；超出屏幕时封顶并启用滚动。
     ///
     /// 必须走 `window.setContentSize(_:)`，不能直接改 `content.frame`：
     /// NSWindow 会用窗口尺寸强制覆盖 contentView 的 frame，直接赋值会被丢掉。
-    /// 那样真窗口里内容区仍是创建时的 480pt，而布局是从 `content.bounds.height`
-    /// 往下排的，行数不够时就排到了窗口上边界之外——顶部几项被裁掉看不见。
-    /// 离屏渲染发现不了这个问题，因为它按 content 的 frame 渲染，
-    /// 恰好是「算对了」的那个高度。
     private func resizeWindow() {
-        let height = contentHeight + Self.inset * 2 + Self.bottomBar
-        window.setContentSize(NSSize(width: Self.windowWidth, height: height))
+        let bodyHeight = contentHeight + Self.inset * 2
+        content.frame = NSRect(x: 0, y: 0, width: Self.windowWidth, height: bodyHeight)
         layoutRows()
+
+        let windowHeight = min(idealWindowHeight, maxWindowHeight)
+        window.setContentSize(NSSize(width: Self.windowWidth, height: windowHeight))
+
+        footer.frame = NSRect(x: 0, y: 0, width: Self.windowWidth, height: Self.bottomBar)
+        scrollView.frame = NSRect(x: 0, y: Self.bottomBar,
+                                  width: Self.windowWidth,
+                                  height: max(0, windowHeight - Self.bottomBar))
+        // 非 flipped 坐标系：滚到顶部 = 文档最高处。
+        content.scroll(NSPoint(x: 0, y: content.bounds.maxY))
+
         resetButton.frame = NSRect(x: Self.inset, y: 14, width: 100, height: 28)
         monsterAppearanceButton.frame = NSRect(x: 144, y: 14, width: 190, height: 28)
     }
 
-    /// 诊断用：内容实际需要多高、窗口**实际提供**多高的内容区、有没有把顶部裁掉。
+    /// 诊断用：理想高度、窗口实际高度、正文顶留白；过长时报告「可滚动」而不是「被裁」。
     ///
-    /// 判据必须用 `window.contentLayoutRect.height` 而不是 `content.bounds.height`：
-    /// 后者读的是我们自己刚赋值的 frame，只改 content.frame 而没调
-    /// setContentSize 时它照样是「够高」的值（窗口要到真正显示时才把 frame 压回去），
-    /// 因此完全测不出这个 bug。contentLayoutRect 才是窗口实际给出的可用高度。
+    /// 顶留白必须相对**文档**量，不能拿窗口高度减行的 maxY——滚动时文档比视口高，
+    /// 后者会把正常布局误判成「超出可视区」。
     func layoutDiagnostics() -> String {
-        let needed = contentHeight + Self.inset * 2 + Self.bottomBar
+        let needed = idealWindowHeight
         let capacity = window.contentLayoutRect.height
         let topMost = rows.map { $0.view.frame.maxY }.max() ?? 0
-        // 顶部留白必须接近 inset。少了说明首行顶到了上沿；多了说明内边距
-        // 被挪到了底部。这条判据是靠肉眼看出来的 bug，只查「够不够高」查不出。
-        let topGap = capacity - topMost
+        let documentHeight = content.bounds.height
+        let topGap = documentHeight - topMost
         let gapOK = abs(topGap - Self.inset) <= 1.5
-        return String(format: "需要 %.0fpt，窗口提供 %.0fpt，%@；最上元素顶端 %.0fpt %@；顶部留白 %.0fpt %@",
-                      needed, capacity,
-                      capacity + 0.5 >= needed ? "足够" : "不足(顶部被裁)",
-                      topMost, capacity + 0.5 >= topMost ? "在可视区内" : "超出可视区",
+        let fit: String
+        if capacity + 0.5 >= needed {
+            fit = "足够"
+        } else if scrollView.documentView != nil {
+            fit = "可滚动"
+        } else {
+            fit = "不足(顶部被裁)"
+        }
+        return String(format: "需要 %.0fpt，窗口提供 %.0fpt，%@；最上元素顶端 %.0fpt 在文档内；顶部留白 %.0fpt %@",
+                      needed, capacity, fit, topMost,
                       topGap, gapOK ? "正常" : "异常(应为 \(Int(Self.inset))pt)")
     }
 
@@ -1067,37 +1120,43 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
     func renderToPNG(_ path: String) {
         if let appearance = renderAppearance {
             content.appearance = appearance
+            rootView.appearance = appearance
+            footer.appearance = appearance
             window.appearance = appearance
         }
         // 必须自己垫一层窗口背景色。
         //
         // contentView 是 wantsLayer 且没有自己的底色，直接 cacheDisplay 得到的
         // 位图背景是**透明**的。真实窗口里看不出来——窗口自己垫了
-        // windowBackgroundColor；离屏渲染没有窗口，就成了「白字 + 透明底」，
-        // 文字整个消失（DetailsView 在 draw() 里自己填了底色，所以它没事）。
-        //
-        // 这个坑被另一个 bug 掩盖了很久：renderAppearance 原先声明在使用之后，
-        // 设置面板那次读到的是 nil，appearance 没生效、文字按系统外观成了深色，
-        // 深字配透明底反而「能看见」。修掉前向引用后深色没了，它才暴露出来。
+        // windowBackgroundColor；离屏渲染没有窗口，就成了「白字 + 透明底」。
         //
         // 必须在设完 appearance 之后再取 cgColor，否则动态色会按当时的当前外观
         // 解析，而不是 darkAqua——那就等于白垫。
+        rootView.wantsLayer = true
+        content.wantsLayer = true
+        footer.wantsLayer = true
         if let appearance = renderAppearance {
             appearance.performAsCurrentDrawingAppearance {
-                content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+                let bg = NSColor.windowBackgroundColor.cgColor
+                rootView.layer?.backgroundColor = bg
+                content.layer?.backgroundColor = bg
+                footer.layer?.backgroundColor = bg
             }
         } else {
-            content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+            let bg = NSColor.windowBackgroundColor.cgColor
+            rootView.layer?.backgroundColor = bg
+            content.layer?.backgroundColor = bg
+            footer.layer?.backgroundColor = bg
         }
         // 夹具是在 init 之后才注入的（renderLaunchAtLoginOverride / renderAppearance），
         // 而 refreshControls() 在 buildRows() 里已经跑过一次。不重刷就等于用注入前
         // 的状态出图——login-on 夹具会画出「未启用」，看起来像功能没实现。
         refreshControls()
         resizeWindow()
-        guard let content = window.contentView else { return }
-        content.layoutSubtreeIfNeeded()
-        guard let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) else { return }
-        content.cacheDisplay(in: content.bounds, to: bitmap)
+        guard let root = window.contentView else { return }
+        root.layoutSubtreeIfNeeded()
+        guard let bitmap = root.bitmapImageRepForCachingDisplay(in: root.bounds) else { return }
+        root.cacheDisplay(in: root.bounds, to: bitmap)
         try? bitmap.representation(using: .png, properties: [:])?
             .write(to: URL(fileURLWithPath: path))
     }
