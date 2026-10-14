@@ -97,11 +97,39 @@ def annulus_lit(name):
 # 正反两条一起锁：画不画外圈由**来源**决定，不由「有没有百分比」决定。
 # 只锁 New API 会漏掉反向错误——曾用 remaining != nil 推断来源，于是 Codex
 # 还没查到数据时（remaining 同样是 nil）空圈整个消失，图标形状随查询状态跳变。
-for name in ['wallet-1721', 'wallet-short', 'wallet-5digits']:
+for name in ['wallet-1721', 'wallet-short', 'wallet-5digits',
+             'wallet-share-high', 'wallet-share-low']:
     check(annulus_lit(name) == 0,
           f'{name} 不得画额度外圈：New API 没有周期分母，空圈会被读成「进度还没开始」')
 check(annulus_lit('no-quota') > 100, 'Codex 尚无数据时外圈必须保留，否则图标形状随查询状态跳变')
 check(annulus_lit('normal-92') > 100, 'Codex 有数据时外圈必须保留')
+
+def wallet_remain_bar_width(name):
+    """累计比例条「还剩」段（黄/橙）的水平跨度。条在 scene y≈46–51、x≈12–72。"""
+    w, h, c, data = load(name)
+    xs = []
+    for y in range(h):
+        py = 128 - y * 128 / h
+        if not (45.5 <= py <= 51.5):
+            continue
+        for x in range(w):
+            sx = x * 128 / w
+            if not (11 <= sx <= 73):
+                continue
+            r, g, b = data[(y * w + x) * c:(y * w + x) * c + 3]
+            # 还剩段：偏黄（R、G 明显高于 B）；已花段是浅灰，不计入。
+            if r > 140 and g > 110 and r - b > 40 and g - b > 20:
+                xs.append(sx)
+    return (max(xs) - min(xs)) if xs else 0.0
+
+high_w = wallet_remain_bar_width('wallet-share-high')
+low_w = wallet_remain_bar_width('wallet-share-low')
+check(high_w > 35, f'高累计剩余必须有明显还剩段，实际跨度 {high_w:.1f}')
+check(low_w > 0.5, f'低累计剩余仍应有还剩段，实际跨度 {low_w:.1f}')
+check(high_w > low_w * 2,
+      f'累计还剩段必须随 share 变长：high={high_w:.1f} low={low_w:.1f}')
+check(wallet_remain_bar_width('wallet-1721') > 0.5,
+      'wallet-1721 必须画出累计比例条')
 def proxy_pixels(name):
     w,h,c,data = load(name)
     return bytes(channel for y in range(h) for x in range(w)

@@ -187,58 +187,47 @@ enum MonsterGeometry {
         binaryCutoff(remaining: remaining, polygon: polygon, top: 6, bottom: 41.01)
     }
 
-    /// 零钱罐轮廓（Notion §20.4 具象变形形态）。
+    /// 零钱罐轮廓（Notion「chester-morph 设计范例｜Monster 变身零钱罐」）。
     ///
-    /// 刻意保持圆钝与偏侧不对称：§20.2 要求变形保持圆钝连续，识别仍靠
-    /// 轮廓与眼睛。**不画嘴、鼻子、耳朵**——靠「侧上耳状隆起 + 投币口 +
-    /// 硬币」读成零钱罐，而不是给角色加五官。投币口画在背脊偏侧，
-    /// 正中会被读成嘴。
+    /// 圆鼓肚子、上部收束成罐颈、宽底；顶部轻微偏侧隆起保留身份锚点。
+    /// 本形态是 §20.2「无嘴」的具象扩展：用户已认可嘴即投币口 + 透明腹。
     static let piggyCommands: [Command] = [
-        .move(10.0, 34.0),
-        .curve(9.6, 28.0, 12.2, 23.4, 16.8, 21.2),
-        .curve(19.6, 19.9, 22.6, 19.4, 25.6, 19.2),
-        // 偏右上的耳状隆起，制造轻微不对称
-        .curve(27.6, 14.6, 32.4, 13.8, 35.4, 16.2),
-        .curve(39.2, 19.2, 40.6, 24.6, 40.4, 30.4),
-        .curve(40.2, 36.4, 36.8, 41.0, 30.6, 41.0),
-        .curve(23.0, 41.4, 14.6, 40.4, 11.4, 36.6),
-        .curve(10.4, 35.8, 10.1, 35.0, 10.0, 34.0),
+        .move(9.8, 34.0),
+        .curve(9.0, 26.0, 11.8, 19.2, 17.8, 15.6),
+        .curve(20.5, 14.0, 23.5, 13.6, 26.2, 13.8),
+        // 偏右上轻微隆起——轮廓记忆，不是独立耳朵
+        .curve(29.0, 11.2, 33.5, 11.6, 36.0, 14.6),
+        .curve(39.8, 18.5, 41.2, 25.0, 40.6, 32.0),
+        .curve(40.0, 38.5, 35.0, 43.2, 27.5, 43.8),
+        .curve(17.5, 44.2, 10.8, 41.2, 9.6, 36.0),
+        .curve(9.4, 35.0, 9.6, 34.4, 9.8, 34.0),
         .close,
     ]
 
     /// 零钱罐多边形，供面积与命中测试用。
     static let piggyPolygon: [CGPoint] = flatten(piggyCommands)
 
-    /// 零钱罐形态下眼睛与投币口的位置。
+    /// 零钱罐解剖：上脸（眼+嘴）/ 下腹（透明窗+币堆）。
     ///
-    /// 换轮廓时必须同步换这两处：原轮廓的眼睛在 (20,17)/(26,17)、身体跨
-    /// y≈6…41，投币口画在 y≈18.6 会跑到身体外面，硬套旧坐标就是第一次渲染
-    /// 那个结果——白色形状浮在左上角，跟真正的身体完全脱开。
+    /// 钱堆整段落在 `bellyTop` 之下，眼睛在嘴之上——范例「眼部留白」硬约束。
     enum PiggyAnatomy {
-        /// 眼睛中心。零钱罐身体重心比原形低且偏右，眼睛跟着下移右移，
-        /// 保持在身体内部并维持双眼识别。
-        static let eyes: [(x: Double, y: Double)] = [(21.0, 29.0), (28.5, 28.4)]
-        static let eyeWidth = 4.2
-        static let eyeHeight = 6.4
-        /// 投币口：背脊**上缘**偏左的一段短横线。
-        ///
-        /// 放在上缘而不是身体中部，硬币才能自然地从口里「堆」出来；
-        /// 放中部会像身上一道装饰线，读不出投币动作。偏左避免被当成嘴。
-        static let slot: (x: Double, y: Double, width: Double, height: Double)
-            = (x: 13.8, y: 14.6, width: 10.2, height: 1.7)
-        /// 硬币堆起点（紧贴投币口上方第一枚的中心）。
-        static let coinCenter: (x: Double, y: Double) = (x: 16.6, y: 12.4)
-        /// 硬币层间距与半径。两列交错，排成一列会像装饰条。
-        ///
-        /// 间距必须容得下四层：最高档 8 枚 = 4 层 × 2 列。层高一旦被压到
-        /// 顶层硬币越出画布（见 drawPiggy 的越界跳过），丰足与充裕就会
-        /// 画出同样多的硬币，四档在视觉上塌成三档。
-        static let coinSpacing = 2.7
-        static let coinColumnGap = 3.2
-        static let coinRadius = 1.75
-        /// 身体在 48×48 坐标系里的纵向范围，用于夹具核对。
-        static let bodyTop = 13.8
-        static let bodyBottom = 41.4
+        /// 更小更近，落在收束的罐颈上，给腹窗留体量。
+        static let eyes: [(x: Double, y: Double)] = [(20.2, 16.4), (25.4, 16.2)]
+        static let eyeWidth = 2.9
+        static let eyeHeight = 4.4
+        /// 嘴/投币口中心。宽高随表情在绘制时缩放；此为充裕微笑基准。
+        static let mouth: (cx: Double, cy: Double, width: Double, height: Double)
+            = (cx: 24.0, cy: 23.2, width: 10.5, height: 3.6)
+        /// 透明腹上沿：面部在上，币堆在下。
+        static let bellyTop = 26.0
+        static let bellyRect = (x: 11.0, y: 26.0, width: 26.0, height: 16.5)
+        static let stackBaseY = 40.6
+        static let stackCentersX: [Double] = [16.8, 24.0, 31.2]
+        static let coinRadiusX = 2.7
+        static let coinRadiusY = 1.35
+        static let coinLift = 1.75
+        static let bodyTop = 11.2
+        static let bodyBottom = 44.2
     }
 
     /// 通用折线化，与 buildPolygon 同算法，只是换输入。

@@ -61,17 +61,16 @@ for suffix in ('','-small'):
 assert not ImageChops.difference(image('piggy-comfortable'),image('piggy-leak')).getbbox(), \
     'piggy bank renders time rings even when windows are supplied'
 
-# The smile must survive at 43pt. A deeper smile arcs the eyes into a thinner crescent,
-# so dark coverage shrinks as prosperity rises — the direction is inverted from intuition,
-# but a monotonic gap of this size proves the eye shape really changes on the Dock icon.
-# A smile that only reads in the 128pt fixture is an indistinguishable oval at 43pt.
-def eye_coverage(state):
+# Mouth is the coin slot (Notion example). Open-mouth tiers paint a larger dark cavity
+# than drained (closed grit line). Sample just below the eyes — not the belly window,
+# which is dark for every tier and would mask the mouth difference.
+def mouth_dark(state):
     img=image(state); s=img.width/256
-    # Face region in the 256px design space, covering both eyes of the piggy form.
-    return sum(1 for y in range(int(158*s),int(202*s)) for x in range(int(94*s),int(170*s))
-               if sum(img.getpixel((x,y)))/3<120)
-smile=[eye_coverage('piggy-'+state) for state in ('drained','tight','comfortable','abundant')]
-assert smile==sorted(smile,reverse=True) and smile[0]-smile[-1]>60, f'smile not readable at 43pt: {smile}'
+    return sum(1 for y in range(int(136*s),int(162*s)) for x in range(int(100*s),int(156*s))
+               if sum(img.getpixel((x,y)))/3<55)
+open_mouth=mouth_dark('piggy-abundant')
+closed_mouth=mouth_dark('piggy-drained')
+assert open_mouth>closed_mouth+40, f'mouth openness not readable: open={open_mouth} closed={closed_mouth}'
 
 # Coins encode absolute amount, so the richest state must paint strictly more of them.
 # Colour is sampled from the actual render rather than hard-coded: anti-aliasing at 43pt
@@ -87,5 +86,11 @@ counts={state:coin_pixels(image(state)) for state in
 assert counts['piggy-abundant']>counts['piggy-comfortable']>counts['piggy-tight']>counts['piggy-drained']>0, f'coins not monotonic: {counts}'
 # No consumption data must not be drawn as zero coins: that would claim an empty wallet.
 assert coin_pixels(image('piggy-unknown'))==0, 'unknown prosperity painted coins'
+# Coins live in the belly; gold must stay below the mouth band (eye-mouth face zone).
+for state in ('piggy-abundant','piggy-comfortable','piggy-tight','piggy-drained'):
+    img=image(state); s=img.width/256
+    gold_ys=[y for y in range(img.height) for x in range(img.width)
+             if (lambda p: p[0]-p[2]>60 and p[0]>130 and p[1]>p[2])(img.getpixel((x,y)))]
+    assert gold_ys and min(gold_ys)>int(150*s), f'coins invade face: {state} ymin={min(gold_ys) if gold_ys else None}'
 assert ImageChops.difference(image('piggy-abundant'),image('piggy-drained')).getbbox(), 'abundance is visually identical'
 print('PASS: Monster area, proxy, motion, independent time rings, 43pt corner clearance and piggy bank coins')

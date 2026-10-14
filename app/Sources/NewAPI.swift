@@ -107,6 +107,17 @@ enum NewAPI {
             guard balance > 0, let dailyBurn, dailyBurn > 0 else { return nil }
             return Double(balance) / Double(dailyBurn)
         }
+
+        /// 累计剩余份额：`余额 / (余额 + 累计已用)`。
+        ///
+        /// 这是历史总和口径，**不是**周期预算。两边皆 0 时无比例可画。
+        /// 仪表 Dock 用它画「还剩 / 已花」双色条；零钱罐仍用离散四档，不绑此连续值。
+        static func lifetimeRemainingShare(balance: Int64, usedQuota: Int64) -> Double? {
+            let bal = max(0, balance), used = max(0, usedQuota)
+            let total = bal + used
+            guard total > 0 else { return nil }
+            return Double(bal) / Double(total)
+        }
     }
 
     // MARK: - 套餐
@@ -184,6 +195,11 @@ enum NewAPI {
 
         var runwayDays: Double? {
             Prosperity.runwayDays(balance: balance, dailyBurn: dailyBurn)
+        }
+
+        /// 累计剩余份额。见 `Prosperity.lifetimeRemainingShare`。
+        var lifetimeRemainingShare: Double? {
+            Prosperity.lifetimeRemainingShare(balance: balance, usedQuota: usedQuota)
         }
 
         /// 余额的展示金额。站点配置缺失时返回 nil，调用方退回原始 quota。

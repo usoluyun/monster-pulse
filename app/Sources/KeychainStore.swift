@@ -23,6 +23,10 @@ enum KeychainStore {
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecUseAuthenticationContext as String: context,
+            // 与 LAContext 双保险：securityd 若仍想弹窗，直接失败而不是挂起。
+            // 前台 Dock 进程占用同一服务槽时，缺这项 `--self-test` 会卡在
+            // SecItemCopyMatching 的 mach_msg 里数分钟。
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
         ]
     }
 
@@ -52,14 +56,44 @@ enum KeychainStore {
         return false
     }
 
+    /// 带超时的读取结果。超时与「条目不存在」必须分开——自检比对真实
+    /// 凭据槽时，把超时当成「不存在」会在前台 Dock 占着 securityd 时误报
+    /// 「自检改了真实凭据槽」。
+    enum ReadResult: Equatable {
+        case value(String)
+        case missing
+        case timedOut
+    }
+
+    static func readResult(service: String, account: String,
+                           timeout: TimeInterval = 2) -> ReadResult {
+        // securityd 被其他进程占住时 SecItemCopyMatching 可能无限等。
+        // 超时必须返回，UI / 自检 / 离屏渲染都不能因此挂死。
+        let gate = DispatchSemaphore(value: 0)
+        var result: ReadResult = .missing
+        DispatchQueue.global(qos: .userInitiated).async {
+            var query = queryBase(service: service, account: account)
+            query[kSecReturnData as String] = true
+            query[kSecMatchLimit as String] = kSecMatchLimitOne
+            var item: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &item)
+            if status == errSecSuccess, let data = item as? Data,
+               let text = String(data: data, encoding: .utf8) {
+                result = .value(text)
+            } else {
+                result = .missing
+            }
+            gate.signal()
+        }
+        if gate.wait(timeout: .now() + timeout) == .timedOut { return .timedOut }
+        return result
+    }
+
     static func read(service: String, account: String) -> String? {
-        var query = queryBase(service: service, account: account)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        if case .value(let text) = readResult(service: service, account: account) {
+            return text
+        }
+        return nil
     }
 
     @discardableResult

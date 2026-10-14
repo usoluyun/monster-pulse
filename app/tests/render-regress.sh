@@ -68,10 +68,15 @@ CASES=(
   # 曾给大字加 displaySuffix，夹具不设它时「%」也没了。两者都由这组锁住。
   # 刻意不给 reset=：该来源没有重置倒计时，render() 里取的是
   # quota?.windows.first?.resetsAt，恒 nil。夹具比现实多显示的东西不是保护。
-  "wallet-1721:nil:0.42:none:both:gpu=0.12,country=US,proxy=on,wallet=¥1721"
-  "wallet-short:nil:0.10:none:both:gpu=0.98,country=US,proxy=on,wallet=¥86"
+  # wallet=/caption= 的值不能含英文逗号：extras 以逗号分隔。千分位只在真实 QuotaSummary 路径出现。
+  # share= 注入累计剩余份额（余额/(余额+累计已用)），画双色条；不是周期外圈。
+  "wallet-1721:nil:0.42:none:both:gpu=0.12,country=US,proxy=on,wallet=¥1721,caption=充裕 · 约 17 天,share=0.046"
+  "wallet-short:nil:0.10:none:both:gpu=0.98,country=US,proxy=on,wallet=¥86,caption=见底,share=0.02"
   # 余额位数变多时字号必须跟着缩，否则会画出版心宽度之外。
-  "wallet-5digits:nil:0.42:none:both:gpu=0.12,country=US,proxy=on,wallet=¥12345"
+  "wallet-5digits:nil:0.42:none:both:gpu=0.12,country=US,proxy=on,wallet=¥12345,caption=富足 · 约 40 天,share=0.80"
+  # 高剩余 vs 低剩余：语义检查断言双色条方向（还剩段随 share 变长）。
+  "wallet-share-high:nil:0.42:none:both:gpu=0.12,country=US,proxy=on,wallet=¥900,caption=富足,share=0.90"
+  "wallet-share-low:nil:0.42:none:both:gpu=0.12,country=US,proxy=on,wallet=¥50,caption=见底,share=0.08"
   "network-unknown:62:0.12:none:both:gpu=1,rail=0.38/0.45,rail2=0.26/0.32,proxy=unknown"
   "quota-empty:0:0:none:both:gpu=0,country=US,proxy=on"
   "quota-full:100:0:none:both:gpu=0,country=US,proxy=on"
@@ -192,6 +197,9 @@ for state in "${SETTINGS_CASES[@]}"; do
   # 这正是「看不到顶部设置」的成因：只改 content.frame 不会让窗口变高，
   # 而离屏渲染按 content.frame 渲染所以看不出来。必须在这里拦住。
   #
+  # 「可滚动」是允许的：New API 段让理想高度超过屏幕时，窗口封顶、正文滚动，
+  # 底栏固定——不是裁切。离屏渲染不封顶，所以基线仍是整页。
+  #
   # 「异常(应为 24pt)」是另一类：窗口够高，但顶部内边距没落到内容上，
   # 首行被顶到上沿、底部多出一块死白。只查「够不够高」发现不了。
   case "$diag" in
@@ -200,6 +208,12 @@ for state in "${SETTINGS_CASES[@]}"; do
   esac
   compare "$state" "$WORK/$state.png"
 done
+# New API 正文高于视口时必须走滚动，不能裁底。强制封顶后诊断应报「可滚动」。
+scroll_diag="$(MP_SETTINGS_MAX_HEIGHT=700 "$APP" --settings-render-test "$WORK/settings-newapi-scroll.png" newapi | grep '^layout:')"
+case "$scroll_diag" in
+  *"可滚动"*) echo "  PASS  settings-newapi 封顶后可滚动：$scroll_diag"; pass=$((pass+1)) ;;
+  *) echo "  FAIL  settings-newapi 封顶后应可滚动，实际：$scroll_diag"; fail=$((fail+1)) ;;
+esac
 
 echo "Monster 视觉回归"
 for state in "${MONSTER_CASES[@]}"; do

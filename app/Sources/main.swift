@@ -76,6 +76,18 @@ func verify() throws {
     // 预计可用天数 = 122942348 / 7152182 = 17.19 天 → 落在 7–30 档。
     if abs((wallet.runwayDays ?? 0) - 17.189488) >= 1e-5 { failures.append("Runway：得到 \(String(describing: wallet.runwayDays))，期望 17.189488") }
     if wallet.prosperity != .comfortable { failures.append("17 天应判为充裕，得到 \(wallet.prosperity.label)") }
+    // 累计剩余份额：122942348 / (122942348 + 2571788418) ≈ 0.0456
+    if let share = NewAPI.Prosperity.lifetimeRemainingShare(balance: 122_942_348, usedQuota: 2_571_788_418) {
+        if abs(share - 122_942_348.0 / (122_942_348.0 + 2_571_788_418.0)) >= 1e-12 {
+            failures.append("累计剩余份额计算错误：\(share)")
+        }
+    } else { failures.append("有余额与累计已用时应算出份额") }
+    if NewAPI.Prosperity.lifetimeRemainingShare(balance: 100, usedQuota: 0) != 1.0 {
+        failures.append("全余额累计份额应为 1") }
+    if NewAPI.Prosperity.lifetimeRemainingShare(balance: 0, usedQuota: 100) != 0.0 {
+        failures.append("全已用累计份额应为 0") }
+    if NewAPI.Prosperity.lifetimeRemainingShare(balance: 0, usedQuota: 0) != nil {
+        failures.append("双零不得发明累计份额") }
 
     // 无近期消耗：有余额但除法无意义，不能显示成无限或富足。
     if NewAPI.Prosperity.classify(subscription: nil, balance: 100_000, dailyBurn: nil) != .unknown {
@@ -159,7 +171,7 @@ func verify() throws {
     // 这里断言的是**结构关系**：档位越低硬币越少、笑越少。
     for level in NewAPI.Prosperity.allCases {
         let coins = MonsterView.coinCount(level), smile = MonsterView.smile(level)
-        if !(0...8).contains(coins) { failures.append("\(level.label) 硬币数越界：\(coins)") }
+        if !(0...20).contains(coins) { failures.append("\(level.label) 硬币数越界：\(coins)") }
         if !(0...1).contains(smile) { failures.append("\(level.label) 微笑程度越界：\(smile)") }
     }
     if MonsterView.coinCount(.abundant) <= MonsterView.coinCount(.comfortable)
@@ -176,22 +188,24 @@ func verify() throws {
     if MonsterView.coinCount(.unknown) != 0 { failures.append("无消耗数据不应画硬币") }
     if MonsterView.smile(.unknown) == MonsterView.smile(.abundant) {
         failures.append("无消耗数据不应显示为满额微笑") }
-    // 零钱罐解剖坐标必须落在画布内，且眼睛、投币口、硬币堆互不重叠。
+    // 零钱罐解剖：眼在嘴上、嘴在腹上、币在腹内（Notion「眼部留白」）。
     typealias Piggy = MonsterGeometry.PiggyAnatomy
-    if Piggy.coinCenter.y - Piggy.coinRadius <= 0 { failures.append("首枚硬币越出画布上沿") }
-    if Piggy.slot.y < Piggy.bodyTop || Piggy.slot.y > Piggy.bodyBottom {
-        failures.append("投币口必须落在身体纵向范围内") }
+    if Piggy.mouth.cy <= Piggy.eyes[0].y + Piggy.eyeHeight {
+        failures.append("嘴必须在眼睛下方") }
+    if Piggy.bellyTop <= Piggy.mouth.cy {
+        failures.append("透明腹上沿必须在嘴下方") }
+    if Piggy.stackBaseY <= Piggy.bellyTop {
+        failures.append("币堆必须落在透明腹内") }
+    if Piggy.mouth.cy < Piggy.bodyTop || Piggy.mouth.cy > Piggy.bodyBottom {
+        failures.append("嘴必须落在身体纵向范围内") }
     for (index, eye) in Piggy.eyes.enumerated() {
-        if eye.y < Piggy.bodyTop || eye.y + Piggy.eyeHeight > Piggy.bodyBottom {
-            failures.append("第 \(index + 1) 只眼越出身体纵向范围") }
-        // 眼睛不能被投币口或硬币堆盖住
-        let slotRight = Piggy.slot.x + Piggy.slot.width
-        let coinRight = Piggy.coinCenter.x + Piggy.coinColumnGap + Piggy.coinRadius
-        if eye.x < slotRight && eye.y < Piggy.slot.y + Piggy.slot.height {
-            failures.append("第 \(index + 1) 只眼与投币口重叠") }
-        if eye.x < coinRight && eye.y < Piggy.coinCenter.y + Piggy.coinRadius {
-            failures.append("第 \(index + 1) 只眼与硬币堆重叠") }
+        if eye.y < Piggy.bodyTop || eye.y + Piggy.eyeHeight > Piggy.bellyTop {
+            failures.append("第 \(index + 1) 只眼必须整段落在面部（腹上沿之上）") }
     }
+    if MonsterView.coinStacks(.abundant).count < 3 {
+        failures.append("富足档必须是多摞币堆构图") }
+    if MonsterView.coinStacks(.drained) != [1] {
+        failures.append("见底档应为罐底单枚") }
     // 零钱罐轮廓本身要在画布内，且是闭合的实心形状。
     if let top = MonsterGeometry.piggyPolygon.map(\.y).min(), top < 0 {
         failures.append("零钱罐轮廓越出画布上沿：\(top)")
@@ -202,20 +216,62 @@ func verify() throws {
     // Keychain 往返。用独立的测试服务名 + 每次随机账户名，不碰真实凭据槽。
     // 账户名必须随机：若上次自检在 delete 前被杀掉，残留条目在无 UI 环境下
     // 可能卡在 SecItemCopyMatching 解密（securityd 等授权），整次自检挂死。
+    //
+    // 整段放进带超时的后台队列：前台 Dock 进程占用同一 securityd 会话时，
+    // 即便设了 interactionNotAllowed，SecItemCopyMatching 仍可能无限等 mach_msg。
+    // 超时记 FAIL 并跳过，绝不能拖死整个 `--self-test`。
     let testService = "com.monsterpulse.selftest"
     let testAccount = "probe-\(UUID().uuidString)"
-    defer { KeychainStore.delete(service: testService, account: testAccount) }
-    if KeychainStore.read(service: testService, account: testAccount) != nil { failures.append("测试槽读取前应为空") }
-    if !KeychainStore.save("secret-value", service: testService, account: testAccount) { failures.append("Keychain 写入失败") }
-    if KeychainStore.read(service: testService, account: testAccount) != "secret-value" { failures.append("Keychain 读取回值不一致") }
-    // 覆盖写：先删后写的路径必须走得通。
-    if !KeychainStore.save("second-value", service: testService, account: testAccount) { failures.append("Keychain 覆盖写失败") }
-    if KeychainStore.read(service: testService, account: testAccount) != "second-value" { failures.append("Keychain 覆盖写后回值不一致") }
-    if !KeychainStore.delete(service: testService, account: testAccount) { failures.append("Keychain 删除失败") }
-    if KeychainStore.read(service: testService, account: testAccount) != nil { failures.append("Keychain 删除后应读不到") }
-    // 真实访问令牌槽是否存在——供末尾「自检不得改变真实凭据槽」比对。
-    let realTokenBefore = KeychainStore.read(service: KeychainStore.Slot.service,
-                                             account: KeychainStore.Slot.accountToken)
+    // nil = 跳过收尾比对（探针超时或真实槽读取超时，避免假阳性）。
+    var realTokenPresentBefore: Bool? = nil
+    do {
+        let gate = DispatchSemaphore(value: 0)
+        var kcFails: [String] = []
+        var tokenPresent: Bool?
+        var skipRealSlot = false
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { gate.signal() }
+            defer { KeychainStore.delete(service: testService, account: testAccount) }
+            switch KeychainStore.readResult(service: testService, account: testAccount) {
+            case .value: kcFails.append("测试槽读取前应为空")
+            case .timedOut:
+                kcFails.append("Keychain 自检超时（可能有前台 MonsterPulse 占用钥匙串）")
+                skipRealSlot = true
+                return
+            case .missing: break
+            }
+            if !KeychainStore.save("secret-value", service: testService, account: testAccount) {
+                kcFails.append("Keychain 写入失败")
+            }
+            if KeychainStore.read(service: testService, account: testAccount) != "secret-value" {
+                kcFails.append("Keychain 读取回值不一致")
+            }
+            if !KeychainStore.save("second-value", service: testService, account: testAccount) {
+                kcFails.append("Keychain 覆盖写失败")
+            }
+            if KeychainStore.read(service: testService, account: testAccount) != "second-value" {
+                kcFails.append("Keychain 覆盖写后回值不一致")
+            }
+            if !KeychainStore.delete(service: testService, account: testAccount) {
+                kcFails.append("Keychain 删除失败")
+            }
+            if KeychainStore.read(service: testService, account: testAccount) != nil {
+                kcFails.append("Keychain 删除后应读不到")
+            }
+            switch KeychainStore.readResult(service: KeychainStore.Slot.service,
+                                            account: KeychainStore.Slot.accountToken) {
+            case .value: tokenPresent = true
+            case .missing: tokenPresent = false
+            case .timedOut: skipRealSlot = true
+            }
+        }
+        if gate.wait(timeout: .now() + 8) == .timedOut {
+            failures.append("Keychain 自检超时（可能有前台 MonsterPulse 占用钥匙串）")
+        } else {
+            failures.append(contentsOf: kcFails)
+            if !skipRealSlot { realTokenPresentBefore = tokenPresent }
+        }
+    }
     // 系统采样。CPU 忙碌率是「相邻两次采样的 tick 差值」，所以必须等计数器
     // 真的走格才有值。
     //
@@ -333,15 +389,29 @@ func verify() throws {
     if walletSummary.source != .newAPI || !walletSummary.usesWalletChrome {
         failures.append("New API 摘要应显式识别为钱包来源")
     }
-    if walletSummary.bigNumber != "¥1721" {
-        failures.append("New API Dock 大字应为 ¥1721，实际 \(walletSummary.bigNumber ?? "nil"))")
+    if walletSummary.bigNumber != "¥1,721" {
+        failures.append("New API Dock 大字应为 ¥1,721，实际 \(walletSummary.bigNumber ?? "nil")")
+    }
+    if QuotaSummary.dockCaption(for: .newAPI(wallet))?.contains("充裕") != true {
+        failures.append("钱包仪表次行应含富足度")
+    }
+    if walletSummary.walletRemainingShare == nil {
+        failures.append("New API 摘要应带累计剩余份额")
+    }
+    if !walletSummary.detailLines.contains(where: { $0.contains("累计剩余") }) {
+        failures.append("详情应标明累计剩余口径")
     }
     for line in walletSummary.detailLines {
+        // 「累计剩余　x%」是钱包自己的份额文案，不是 Codex 的周期 %。
+        if line.contains("累计") { continue }
         for residue in ["5h", "5 小时", "周", "重置", "%"] where line.contains(residue) {
             failures.append("New API 摘要混入 Codex 残留「\(residue)」：\(line)")
         }
     }
     let codexSummary = QuotaSummary.of(.codex(demoQuota, fetchedAt: menuNow), now: menuNow)
+    if codexSummary.walletRemainingShare != nil {
+        failures.append("Codex 摘要不得带钱包累计份额")
+    }
     if !codexSummary.hasData || codexSummary.source != .codex || codexSummary.usesWalletChrome {
         failures.append("Codex 摘要应显式识别为 Codex 来源且有数据")
     }
@@ -792,10 +862,21 @@ func verify() throws {
     }
     // 真实凭据槽同样不得被自检改动。这里只比「有没有」，不比内容——
     // 读出用户令牌再放进内存就等于自检接触了凭据。
-    let realTokenAfter = KeychainStore.read(service: KeychainStore.Slot.service,
-                                            account: KeychainStore.Slot.accountToken)
-    if (realTokenBefore == nil) != (realTokenAfter == nil) {
-        throw ReadError.message("自检不得改变真实凭据槽")
+    // Keychain 段超时则跳过（没有 before 可对照，硬读反而再挂一次）。
+    if let beforePresent = realTokenPresentBefore {
+        switch KeychainStore.readResult(service: KeychainStore.Slot.service,
+                                        account: KeychainStore.Slot.accountToken) {
+        case .timedOut:
+            break // 读不到就不比对，避免把超时误报成「改了凭据槽」
+        case .value:
+            if beforePresent != true {
+                throw ReadError.message("自检不得改变真实凭据槽")
+            }
+        case .missing:
+            if beforePresent != false {
+                throw ReadError.message("自检不得改变真实凭据槽")
+            }
+        }
     }
     print("PASS: quota parsing, missing/invalid/other buckets, New API wallet parsing, unit conversion, prosperity levels, piggy bank anatomy, CPU and memory sampling, window title and countdown formatting, dock menu structure, config clamping, quota alerts")
 }
@@ -905,6 +986,19 @@ if CommandLine.arguments.contains("--render-test") {
         if key == "wallet", parts.count == 2 {
             view.displayNumber = parts[1]
             view.showsQuotaRing = false
+            // 夹具默认次行，避免仪表只剩光秃金额；真实文案由 QuotaSummary.dockCaption 给出。
+            if view.walletCaption == nil { view.walletCaption = "充裕 · 约 17 天" }
+            // 默认累计份额：fixture 钱包余额¥1721 / (1721+36005) ≈ 0.046
+            if view.walletRemainingShare == nil { view.walletRemainingShare = 0.046 }
+            continue
+        }
+        if key == "caption", parts.count == 2 {
+            view.walletCaption = parts[1]
+            continue
+        }
+        // share=<0...1>：累计剩余份额。走真实口径的夹具注入，不写死像素。
+        if key == "share", parts.count == 2, let value = Double(parts[1]) {
+            view.walletRemainingShare = min(1, max(0, value))
             continue
         }
         if key == "nomemory" { view.memory = nil; continue }
@@ -1104,13 +1198,15 @@ if CommandLine.arguments.contains("--settings-render-test") {
                                       alertFailureStreak: base.alertFailureStreak,
                                       diskAlertMBs: base.diskAlertMBs, proxyURL: "127.0.0.1:12334")
     }
-    let controller = SettingsWindowController(config: config) { _ in }
-    // 勾选态必须由夹具钉死，不能读真实 UserDefaults。
+    // 勾选态必须由夹具钉死，不能读真实 Keychain / UserDefaults。
     //
     // 真实域里「已保存访问令牌」取决于这台机器之前填过没有，基线图
-    // 不能跟着机器状态漂。强制置 false 让 newapi 夹具固定画未保存态。
-    // 「令牌已保存」这一态由真机点验覆盖，不由基准图覆盖。
-    controller.renderHasNewAPITokenOverride = state == "newapi-saved" ? true : (state == "newapi" ? false : nil)
+    // 不能跟着机器状态漂。所有离屏态都显式注入（经 init 参数，赶在
+    // buildRows 读钥匙串之前）：newapi-saved 为已保存，其余一律未保存。
+    // 「令牌已保存」真机路径由点验覆盖，不由基准图覆盖。
+    let tokenOverride = (state == "newapi-saved")
+    let controller = SettingsWindowController(config: config, onChange: { _ in },
+                                              renderHasNewAPITokenOverride: tokenOverride)
     // 自启状态一律钉死，不读系统真值。
     //
     // 不钉的话基线图会随「用户是否开启过自启」「跑的是 .build 还是
@@ -1302,13 +1398,16 @@ final class DockView: NSView {
     var monsterEnabled = false
     var remaining: Int?
     /// Dock 中央的大字。由 `QuotaSummary` 按来源给：Codex 是「62」（后缀「%」
-    /// 与外圈同属百分比通道，由 `remaining != nil` 隐含），New API 是「¥1721」。
+    /// 与外圈同属百分比通道，由 `remaining != nil` 隐含），New API 是「¥1,721」。
     ///
     /// 不能只拿 `remaining` 画：New API 模式下它恒为 nil，会画成「—」，
     /// 而实际有钱包数据。New API 也没有百分比，外圈那一整圈都跳过。
-    ///
-    /// New API 模式下 `displayNumber` 为 nil，由上面那个来源判据接手。
     var displayNumber: String?
+    /// 钱包仪表次行（富足度 · 预计可用）。仅 New API；Codex 为 nil。
+    var walletCaption: String?
+    /// 累计剩余份额 `余额/(余额+累计已用)`。仅 New API；用于双色比例条。
+    /// 不是周期进度——外圈仍不画（`showsQuotaRing`）。
+    var walletRemainingShare: Double?
     /// 是否画额度外圈。这是**来源**属性，不是数据属性：Codex 没查到数据时
     /// 仍然画空圈（图标形状稳定），New API 永远不画（没有周期分母，
     /// 空圈会被读成「进度还没开始」）。曾用 `remaining != nil` 代替，
@@ -1479,9 +1578,40 @@ final class DockView: NSView {
                 arc.stroke()
             }
         }
-        // 大字：New API 是金额，自带货币符号、没有百分比也没有后缀，整块居中；
-        // Codex 走原来的「数字 + %」分栏，一像素都不动。
-        if let text = displayNumber {
+        // 大字：New API = 余额 + 次行 + 累计「还剩/已花」双色条；Codex =「数字 + %」。
+        if let text = displayNumber, !showsQuotaRing {
+            // 读数区上沿必须 < 84（scene y）：dock-layout-check 在 y≥84 的圆环带
+            // 上检测「有没有额度外圈」，内容伸进该带会被误判成画了空圈。
+            let size: CGFloat = text.count > 6 ? 13 : (text.count > 5 ? 15 : 17)
+            drawGlyph(text, in: NSRect(x: 12, y: 62, width: 60, height: size + 6),
+                      size: size, color: markStale ? .systemOrange : .white)
+            if let caption = walletCaption {
+                drawGlyph(caption, in: NSRect(x: 12, y: 52, width: 60, height: 12),
+                          size: 8, color: markStale ? .systemOrange.withAlphaComponent(0.85) : .lightGray)
+            }
+            // 累计比例条：左=还剩（亮），右=已花（暗）。不是周期进度环。
+            if let share = walletRemainingShare {
+                let track = NSRect(x: 12, y: 46, width: 60, height: 5)
+                NSColor.white.withAlphaComponent(0.12).setFill()
+                NSBezierPath(roundedRect: track, xRadius: 2.5, yRadius: 2.5).fill()
+                let remainWidth = track.width * CGFloat(min(1, max(0, share)))
+                if remainWidth > 0.5 {
+                    (markStale ? NSColor.systemOrange : NSColor.systemYellow)
+                        .withAlphaComponent(0.9).setFill()
+                    NSBezierPath(roundedRect: NSRect(x: track.minX, y: track.minY,
+                                                     width: remainWidth, height: track.height),
+                                 xRadius: 2.5, yRadius: 2.5).fill()
+                }
+                let spentX = track.minX + remainWidth
+                let spentWidth = track.maxX - spentX
+                if spentWidth > 0.5 {
+                    NSColor.white.withAlphaComponent(0.28).setFill()
+                    NSBezierPath(roundedRect: NSRect(x: spentX, y: track.minY,
+                                                     width: spentWidth, height: track.height),
+                                 xRadius: 2.5, yRadius: 2.5).fill()
+                }
+            }
+        } else if let text = displayNumber {
             let size: CGFloat = text.count > 4 ? 15 : (text.count > 3 ? 18 : 22)
             drawGlyph(text, in: NSRect(x: 8, y: 54, width: 84, height: size + 9),
                       size: size, color: markStale ? .systemOrange : .white)
@@ -1999,6 +2129,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let profile = summary.profile ?? ProviderProfile.of(quotaSource)
         dock.remaining = quota?.windows.first?.remaining
         dock.displayNumber = summary.bigNumber
+        dock.walletCaption = QuotaSummary.dockCaption(for: snapshot)
+        dock.walletRemainingShare = summary.walletRemainingShare
         dock.showsQuotaRing = profile.showsQuotaRing
         dock.country = network.exit?.country
         dock.proxyEnabled = network.probeProxyEnabled
@@ -2048,7 +2180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 开关必须计入状态串：否则用户关掉 CPU 后图标内容变了却不会重绘
         let railsSignature = dock.rails.map { String(format: "%.3f/%.3f", $0.used, $0.elapsed ?? -1) }
             .joined(separator: ",")
-        let dockState = "\(dock.remaining ?? -1):\(dock.stale):\(config.showCPU):\(config.showGPU):\(config.showMemory):\(config.showDisk):"
+        let dockState = "\(dock.remaining ?? -1):\(dock.displayNumber ?? "-"):\(dock.walletCaption ?? "-"):\(dock.stale):\(config.showCPU):\(config.showGPU):\(config.showMemory):\(config.showDisk):"
             + "\(Int((dock.cpu ?? -1) * 100)):\(Int((dock.gpu ?? -1) * 100)):\(Int((dock.memory ?? -1) * 100)):\(Int((dock.diskRead ?? -1) * 100)):\(Int((dock.diskWrite ?? -1) * 100)):\(railsSignature):\(dock.country ?? "?"):\(String(describing: dock.proxyEnabled)):\(dock.resetLabel ?? "-")"
         if config.monster.enabled || dockState != lastDockState { NSApp.dockTile.display(); lastDockState = dockState }
         details.update(

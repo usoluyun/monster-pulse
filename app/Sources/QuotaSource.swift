@@ -83,6 +83,9 @@ struct QuotaSummary {
     /// 是否有任何可展示的数据。**不能**用 `quota != nil` 判断——
     /// New API 模式下 quota 恒为 nil，那样会把有数据判成「暂无数据」。
     let hasData: Bool
+    /// New API 累计剩余份额 `余额/(余额+累计已用)`。Codex / 无数据为 nil。
+    /// 仪表 Dock 画双色条用；**不是**周期进度。
+    let walletRemainingShare: Double?
 
     var sourceLabel: String { source?.label ?? "" }
     var profile: ProviderProfile? { source.map(ProviderProfile.of) }
@@ -104,7 +107,8 @@ struct QuotaSummary {
     }
 
     static let empty = QuotaSummary(bigNumber: nil, detailLines: [],
-                                    source: nil, hasData: false)
+                                    source: nil, hasData: false,
+                                    walletRemainingShare: nil)
 
     static func of(_ snapshot: QuotaSnapshot?, loading: Bool = false,
                    errorText: String? = nil, stale: Bool = false,
@@ -113,7 +117,8 @@ struct QuotaSummary {
             var lines = [loading ? "正在查询…" : "暂无数据"]
             if let errorText { lines.append(errorText) }
             return QuotaSummary(bigNumber: nil, detailLines: lines,
-                                source: nil, hasData: false)
+                                source: nil, hasData: false,
+                                walletRemainingShare: nil)
         }
         switch snapshot {
         case .codex(let quota, _):
@@ -125,13 +130,15 @@ struct QuotaSummary {
             lines.append(contentsOf: footer(errorText: errorText, stale: stale))
             return QuotaSummary(bigNumber: String(window.remaining),
                                 detailLines: lines, source: .codex,
-                                hasData: !quota.windows.isEmpty)
+                                hasData: !quota.windows.isEmpty,
+                                walletRemainingShare: nil)
         case .newAPI(let wallet):
             let symbol = wallet.site.currencySymbol
             func money(_ quota: Int64) -> String {
                 wallet.site.amount(forQuota: quota)
                     .map { "\(symbol)\(String(format: "%.2f", $0))" } ?? "原始额度 \(quota)"
             }
+            let share = wallet.lifetimeRemainingShare
             var lines = ["账户余额　\(money(wallet.balance))　\(wallet.prosperity.label)"]
             lines.append("近 24 小时消耗　\(money(wallet.dailyBurn ?? 0))")
             // 预计可用天数是余额÷近 24h 消耗，单日抖动大，必须标注为估算。
@@ -141,16 +148,38 @@ struct QuotaSummary {
                 // 没有消耗数据不等于无限，明确说「无近期用量」
                 lines.append("预计可用　无近期用量")
             }
+            if let share {
+                // 累计口径：余额/(余额+累计已用)，不是周期预算。
+                lines.append(String(format: "累计剩余　%.0f%%（余额/(余额+累计已用)）", share * 100))
+            }
             if let subscription = wallet.activeSubscription {
                 lines.append("套餐剩余　\(String(format: "%.0f%%", (subscription.remainingFraction ?? 0) * 100))")
             }
             lines.append(contentsOf: footer(errorText: errorText, stale: stale))
-            // Dock 大字：43pt 下数字比「充裕」可读，信息也更准；档位由硬币表达。
-            let big = wallet.site.amount(forQuota: wallet.balance)
-                .map { "\(symbol)\(String(format: "%.0f", $0))" }
+            // Dock 大字：千分位金额更专业；档位由零钱罐与次行文案表达。
+            let big = wallet.site.amount(forQuota: wallet.balance).map { amount -> String in
+                let formatter = NumberFormatter()
+                formatter.numberStyle = .decimal
+                formatter.maximumFractionDigits = 0
+                let digits = formatter.string(from: NSNumber(value: amount.rounded())) ?? String(format: "%.0f", amount)
+                return "\(symbol)\(digits)"
+            }
             return QuotaSummary(bigNumber: big, detailLines: lines,
-                                source: .newAPI, hasData: true)
+                                source: .newAPI, hasData: true,
+                                walletRemainingShare: share)
         }
+    }
+
+    /// 仪表 Dock 次行：富足度 + 预计可用（仅钱包来源）。
+    static func dockCaption(for snapshot: QuotaSnapshot?) -> String? {
+        guard case .newAPI(let wallet) = snapshot else { return nil }
+        var parts = [wallet.prosperity.label]
+        if let days = wallet.runwayDays {
+            parts.append(String(format: "约 %.0f 天", days.rounded()))
+        } else if wallet.balance > 0, wallet.prosperity != .unknown {
+            parts.append("无近期用量")
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
