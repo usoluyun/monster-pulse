@@ -22,17 +22,200 @@ let renderAppearance = NSAppearance(named: .darkAqua)!
 signal(SIGPIPE, SIG_IGN)
 
 func verify() throws {
+    // 收集式断言：先跑完全部用例再汇总输出，退出码 1。
+    //
+    // 这里不用 precondition：precondition 触发 SIGTRAP，stderr 在 trap 前不冲刷，
+    // 失败时看不到是哪一条（本次开发 M3 时实测踩到：断言值写错，只拿到 exit 133
+    // 和零输出，只能另外编一个独立测试壳去二分才定位），且一次只能暴露一条。
+    // 声明放在函数最前面，让函数开头那段额度解析也能用同一套机制。
+    var failures: [String] = []
     let realDomain = Bundle.main.bundleIdentifier ?? "MonsterPulse"
     let realConfigBefore = UserDefaults.standard.persistentDomain(forName: realDomain) as NSDictionary?
     let q = try Quota.parse(["rateLimits": ["primary": ["usedPercent": 25.0, "windowDurationMins": 300]]])
-    precondition(q.windows.first?.remaining == 75)
+    if q.windows.first?.remaining != 75 { failures.append("Quota 剩余比例：得到 \(String(describing: q.windows.first?.remaining))，期望 75") }
     let mapped = try Quota.parse(["rateLimitsByLimitId": ["codex": ["primary": ["usedPercent": 100.0]]]])
-    precondition(mapped.windows.first?.remaining == 0)
+    if mapped.windows.first?.remaining != 0 { failures.append("满额剩余应为 0，得到 \(String(describing: mapped.windows.first?.remaining))") }
     for invalid: [String: Any] in [[:], ["rateLimits": ["primary": ["usedPercent": -1.0]]],
         ["rateLimitsByLimitId": ["other": ["primary": ["usedPercent": 20.0]]]]] {
-        do { _ = try Quota.parse(invalid); throw ReadError.message("Invalid quota accepted") }
-        catch ReadError.message(let value) { precondition(value != "Invalid quota accepted") }
+        var rejected = false
+        do { _ = try Quota.parse(invalid) } catch { rejected = true }
+        if !rejected { failures.append("非法额度响应未被拒绝：\(invalid)") }
     }
+
+    // New API 解析。夹具是 docs/new-api-research.md 记录的 2026-10-10 实测响应，
+    // 断言值由被测函数自己从原始 quota 算出，不写死展示文案。
+    let newAPISite = NewAPI.SiteConfig.parse(["data": [
+        "quota_per_unit": 500_000, "usd_exchange_rate": 7, "quota_display_type": "CNY",
+        "version": "v1.0.0-rc.25"]])
+    // 余额 122942348 → 122942348 / 500000 × 7 = ¥1721.192872
+    let balanceAmount = newAPISite.amount(forQuota: 122_942_348) ?? -1
+    if abs(balanceAmount - 1721.192872) >= 1e-6 { failures.append("New API 余额换算：得到 \(balanceAmount)，期望 1721.192872") }
+    // price=7.3 与 usd_exchange_rate=7 不等，换算必须用后者。
+    if newAPISite.amount(forQuota: 500_000) != 7.0 { failures.append("换算必须用 usd_exchange_rate，得到 \(String(describing: newAPISite.amount(forQuota: 500_000)))") }
+    // 站点配置缺失时不得猜汇率，返回 nil 而不是假装是 1:1。
+    let noSite = NewAPI.SiteConfig.parse(["data": ["version": "v1.0.0-rc.25"]])
+    if noSite.amount(forQuota: 122_942_348) != nil { failures.append("缺换算配置时不得猜汇率") }
+
+    let walletUser: [String: Any] = ["success": true, "data": [
+        "quota": 122_942_348, "used_quota": 2_571_788_418, "request_count": 107_884]]
+    // 8 条小时聚合，逐条求和；count 合计 633。
+    let walletData: [String: Any] = ["success": true, "data": [
+        ["quota": 894_023, "count": 79], ["quota": 901_117, "count": 81],
+        ["quota": 889_240, "count": 78], ["quota": 902_331, "count": 80],
+        ["quota": 897_556, "count": 79], ["quota": 888_742, "count": 77],
+        ["quota": 889_523, "count": 79], ["quota": 889_650, "count": 80]]]
+    let walletSubs: [String: Any] = ["success": true, "data": [
+        "billing_preference": "subscription_first", "subscriptions": [String: Any]()]]
+    guard let wallet = NewAPI.Wallet.parse(userSelf: walletUser, dataSelf: walletData,
+        subscriptionSelf: walletSubs, site: newAPISite) else {
+        throw ReadError.message("New API 钱包解析失败") }
+    if wallet.dailyBurn != 7_152_182 { failures.append("近 24h 消耗逐条求和：得到 \(String(describing: wallet.dailyBurn))，期望 7152182") }
+    if wallet.dailyRequests != 633 { failures.append("近 24h 请求数求和：得到 \(String(describing: wallet.dailyRequests))，期望 633") }
+    if wallet.requestCount != 107_884 { failures.append("账户请求数：得到 \(String(describing: wallet.requestCount))") }
+    if wallet.activeSubscription != nil { failures.append("空订阅数组应解析为无套餐") }
+    // 预计可用天数 = 122942348 / 7152182 = 17.19 天 → 落在 7–30 档。
+    if abs((wallet.runwayDays ?? 0) - 17.189488) >= 1e-5 { failures.append("Runway：得到 \(String(describing: wallet.runwayDays))，期望 17.189488") }
+    if wallet.prosperity != .comfortable { failures.append("17 天应判为充裕，得到 \(wallet.prosperity.label)") }
+
+    // 无近期消耗：有余额但除法无意义，不能显示成无限或富足。
+    if NewAPI.Prosperity.classify(subscription: nil, balance: 100_000, dailyBurn: nil) != .unknown {
+        failures.append("无消耗数据必须单列，不能伪装成富足") }
+    if NewAPI.Prosperity.classify(subscription: nil, balance: 0, dailyBurn: nil) != .drained {
+        failures.append("余额耗尽应为见底") }
+    // 套餐口径优先于钱包口径，且总额为零是不限额而非除零。
+    let sub = NewAPI.Subscription.parse(["subscription": [
+        "amount_total": 1_000_000, "amount_used": 100_000, "status": "active"]])
+    if NewAPI.Prosperity.classify(subscription: sub, balance: 0, dailyBurn: nil) != .abundant {
+        failures.append("有可信套餐总额时应走套餐口径") }
+    if sub?.remainingFraction != 0.9 { failures.append("套餐剩余比例：得到 \(String(describing: sub?.remainingFraction))，期望 0.9") }
+    let unlimited = NewAPI.Subscription.parse(["subscription": ["amount_total": 0, "amount_used": 0]])
+    if unlimited?.remainingFraction != nil || unlimited?.remainingQuota != nil {
+        failures.append("不限额套餐不得当作 100%") }
+    // 业务成功标记逐接口不同：user/self 用 success，billing 用 code。
+    if !NewAPI.isSuccess(["success": true]) || !NewAPI.isSuccess(["code": 0]) { failures.append("成功标记判定错误") }
+    if NewAPI.isSuccess(["success": false]) || NewAPI.isSuccess(["code": 1]) { failures.append("失败标记判定错误") }
+    // 站点页面的近 24h 窗口是「前 23 小时至后 1 小时」，不是严格滚动 24h。
+    let window = NewAPI.recentWindow(now: Date(timeIntervalSince1970: 1_000_000))
+    if window.end != 1_003_600 || window.start != window.end - 86_400 { failures.append("近 24h 统计范围必须与页面口径一致") }
+
+    // 来源适配层。重点验证世代守卫：切来源后在途的旧请求仍会返回，
+    // 不比对世代就会覆盖新来源显示，且只在旧请求更慢时偶发。
+    if !QuotaEpoch.initial.accepts(.initial) { failures.append("同世代应被接受") }
+    if QuotaEpoch.initial.accepts(.initial.advanced()) { failures.append("旧世代结果不得被接受") }
+    if !QuotaEpoch.initial.advanced().accepts(.initial.advanced()) { failures.append("推进后新世代应被接受") }
+    if QuotaEpoch.initial.advanced().advanced().accepts(.initial) { failures.append("跨代不得被接受") }
+    // 只有 Codex 有时间窗口；New API 不得映射出太阳高度或时间环。
+    if !QuotaSource.codex.hasTimeWindow || QuotaSource.newAPI.hasTimeWindow { failures.append("来源时间窗口能力判定错误") }
+    // Provider Profile：能力与文案必须按来源隔离，禁止 isWallet 式二分残留。
+    let codexProfile = ProviderProfile.codex, newAPIProfile = ProviderProfile.newAPI
+    if codexProfile.capabilities.hasWallet || !codexProfile.capabilities.hasTimeWindow {
+        failures.append("Codex Profile 能力错误")
+    }
+    if !newAPIProfile.capabilities.hasWallet || newAPIProfile.capabilities.hasTimeWindow {
+        failures.append("New API Profile 能力错误")
+    }
+    if codexProfile.refreshButtonTitle != "刷新额度" || newAPIProfile.refreshButtonTitle != "刷新钱包" {
+        failures.append("刷新按钮文案必须随 Profile")
+    }
+    if codexProfile.dockRefreshTitle != "立即刷新额度" || newAPIProfile.dockRefreshTitle != "立即刷新钱包" {
+        failures.append("Dock 刷新文案必须随 Profile")
+    }
+    if codexProfile.settingsAlertControls.contains(.walletTierNote)
+        || !codexProfile.settingsAlertControls.contains(.quotaThreshold)
+        || !codexProfile.settingsAlertControls.contains(.resetLead) {
+        failures.append("Codex 设置预警控件集合错误：\(codexProfile.settingsAlertControls)")
+    }
+    if newAPIProfile.settingsAlertControls.contains(.quotaThreshold)
+        || newAPIProfile.settingsAlertControls.contains(.resetLead)
+        || !newAPIProfile.settingsAlertControls.contains(.walletTierNote) {
+        failures.append("New API 设置预警不得含剩余%/重置前：\(newAPIProfile.settingsAlertControls)")
+    }
+    if !newAPIProfile.capabilities.offersFollowAppProxy || codexProfile.capabilities.offersFollowAppProxy {
+        failures.append("仅 New API 提供跟随应用代理选项")
+    }
+    // 跟随应用代理：默认直连；勾选后才解析应用代理。
+    var followCfg = Config.default
+    followCfg.proxyURL = "http://127.0.0.1:12334"
+    followCfg.newAPIFollowAppProxy = false
+    if followCfg.newAPIProxy != nil { failures.append("未勾选跟随时 New API 必须直连") }
+    followCfg.newAPIFollowAppProxy = true
+    if followCfg.newAPIProxy?.absoluteString != "http://127.0.0.1:12334" {
+        failures.append("勾选跟随时应使用应用代理，得到 \(String(describing: followCfg.newAPIProxy))")
+    }
+    // 缓存隔离：换地址或换凭据必须得到不同的键，同一组合则稳定。
+    let keyA = QuotaCacheKey(baseURL: "https://a.example", accessToken: "token-1")
+    let keyB = QuotaCacheKey(baseURL: "https://a.example", accessToken: "token-2")
+    let keyC = QuotaCacheKey(baseURL: "https://b.example", accessToken: "token-1")
+    if keyA == keyB || keyA == keyC { failures.append("缓存键未按地址与凭据隔离") }
+    if keyA != QuotaCacheKey(baseURL: "https://a.example", accessToken: "token-1") { failures.append("同地址同凭据应命中同一缓存键") }
+    if keyA.credentialFingerprint.contains("token-1") { failures.append("缓存键不得包含令牌明文") }
+    // 陈旧阈值按来源分开，避免 New API 在正常轮询下频繁报陈旧。
+    let codexSnapshot = QuotaSnapshot.codex(q, fetchedAt: Date(timeIntervalSince1970: 1_700_000_000))
+    if !codexSnapshot.isStale(now: Date(timeIntervalSince1970: 1_700_000_000 + 16 * 60)) { failures.append("Codex 16 分钟应判陈旧") }
+    if codexSnapshot.isStale(now: Date(timeIntervalSince1970: 1_700_000_000 + 14 * 60)) { failures.append("Codex 14 分钟不应判陈旧") }
+    if codexSnapshot.source != .codex { failures.append("快照来源判定错误") }
+
+    // 零钱罐形态语义。数值本身是设计建议（阈值待实测校准），
+    // 这里断言的是**结构关系**：档位越低硬币越少、笑越少。
+    for level in NewAPI.Prosperity.allCases {
+        let coins = MonsterView.coinCount(level), smile = MonsterView.smile(level)
+        if !(0...8).contains(coins) { failures.append("\(level.label) 硬币数越界：\(coins)") }
+        if !(0...1).contains(smile) { failures.append("\(level.label) 微笑程度越界：\(smile)") }
+    }
+    if MonsterView.coinCount(.abundant) <= MonsterView.coinCount(.comfortable)
+        || MonsterView.coinCount(.comfortable) <= MonsterView.coinCount(.tight)
+        || MonsterView.coinCount(.tight) <= MonsterView.coinCount(.drained) {
+        failures.append("硬币数必须随富足度递减")
+    }
+    if MonsterView.smile(.abundant) <= MonsterView.smile(.comfortable)
+        || MonsterView.smile(.comfortable) <= MonsterView.smile(.tight)
+        || MonsterView.smile(.tight) < MonsterView.smile(.drained) {
+        failures.append("微笑程度必须随富足度递增")
+    }
+    // 无消耗数据不画硬币：把「没有数据」画成 0 枚硬币等于说「一点钱都没有」。
+    if MonsterView.coinCount(.unknown) != 0 { failures.append("无消耗数据不应画硬币") }
+    if MonsterView.smile(.unknown) == MonsterView.smile(.abundant) {
+        failures.append("无消耗数据不应显示为满额微笑") }
+    // 零钱罐解剖坐标必须落在画布内，且眼睛、投币口、硬币堆互不重叠。
+    typealias Piggy = MonsterGeometry.PiggyAnatomy
+    if Piggy.coinCenter.y - Piggy.coinRadius <= 0 { failures.append("首枚硬币越出画布上沿") }
+    if Piggy.slot.y < Piggy.bodyTop || Piggy.slot.y > Piggy.bodyBottom {
+        failures.append("投币口必须落在身体纵向范围内") }
+    for (index, eye) in Piggy.eyes.enumerated() {
+        if eye.y < Piggy.bodyTop || eye.y + Piggy.eyeHeight > Piggy.bodyBottom {
+            failures.append("第 \(index + 1) 只眼越出身体纵向范围") }
+        // 眼睛不能被投币口或硬币堆盖住
+        let slotRight = Piggy.slot.x + Piggy.slot.width
+        let coinRight = Piggy.coinCenter.x + Piggy.coinColumnGap + Piggy.coinRadius
+        if eye.x < slotRight && eye.y < Piggy.slot.y + Piggy.slot.height {
+            failures.append("第 \(index + 1) 只眼与投币口重叠") }
+        if eye.x < coinRight && eye.y < Piggy.coinCenter.y + Piggy.coinRadius {
+            failures.append("第 \(index + 1) 只眼与硬币堆重叠") }
+    }
+    // 零钱罐轮廓本身要在画布内，且是闭合的实心形状。
+    if let top = MonsterGeometry.piggyPolygon.map(\.y).min(), top < 0 {
+        failures.append("零钱罐轮廓越出画布上沿：\(top)")
+    }
+    if MonsterGeometry.area(MonsterGeometry.piggyPolygon) <= 0 { failures.append("零钱罐轮廓面积为零") }
+    if MonsterGeometry.piggyPolygon.count < 20 { failures.append("零钱罐轮廓点数异常，疑似折线化失败") }
+
+    // Keychain 往返。用独立的测试服务名 + 每次随机账户名，不碰真实凭据槽。
+    // 账户名必须随机：若上次自检在 delete 前被杀掉，残留条目在无 UI 环境下
+    // 可能卡在 SecItemCopyMatching 解密（securityd 等授权），整次自检挂死。
+    let testService = "com.monsterpulse.selftest"
+    let testAccount = "probe-\(UUID().uuidString)"
+    defer { KeychainStore.delete(service: testService, account: testAccount) }
+    if KeychainStore.read(service: testService, account: testAccount) != nil { failures.append("测试槽读取前应为空") }
+    if !KeychainStore.save("secret-value", service: testService, account: testAccount) { failures.append("Keychain 写入失败") }
+    if KeychainStore.read(service: testService, account: testAccount) != "secret-value" { failures.append("Keychain 读取回值不一致") }
+    // 覆盖写：先删后写的路径必须走得通。
+    if !KeychainStore.save("second-value", service: testService, account: testAccount) { failures.append("Keychain 覆盖写失败") }
+    if KeychainStore.read(service: testService, account: testAccount) != "second-value" { failures.append("Keychain 覆盖写后回值不一致") }
+    if !KeychainStore.delete(service: testService, account: testAccount) { failures.append("Keychain 删除失败") }
+    if KeychainStore.read(service: testService, account: testAccount) != nil { failures.append("Keychain 删除后应读不到") }
+    // 真实访问令牌槽是否存在——供末尾「自检不得改变真实凭据槽」比对。
+    let realTokenBefore = KeychainStore.read(service: KeychainStore.Slot.service,
+                                             account: KeychainStore.Slot.accountToken)
     // 系统采样。CPU 忙碌率是「相邻两次采样的 tick 差值」，所以必须等计数器
     // 真的走格才有值。
     //
@@ -63,10 +246,7 @@ func verify() throws {
     // 窗口标题由后端返回的长度推导，不硬编码「五小时」「每周」；
     // 缺长度或非正数要落到不猜窗口的兜底文案。
     //
-    // 这里用收集式断言而不是 precondition：precondition 触发 SIGTRAP，
-    // stderr 在 trap 前不冲刷，失败时看不到是哪一条（实测踩过），
-    // 且一次只能暴露一条。改成先跑完全部用例再汇总输出。
-    var failures: [String] = []
+    // 断言机制声明已提到函数开头，见那里的说明。
     let unknownSummary = MonsterSummary.text(remaining:nil,week:nil,cpu:nil,gpu:nil,showCPU:false,proxy:nil,stale:false)
     let ringNow = Date(timeIntervalSince1970:1_700_000_000)
     for (minutes,fraction) in [(300,0.4),(10080,0.28)] {
@@ -145,6 +325,41 @@ func verify() throws {
         QuotaWindow(used: 8, minutes: 300, resetsAt: menuNow.addingTimeInterval(3 * 3600 + 12 * 60)),
         QuotaWindow(used: 10, minutes: 10080, resetsAt: menuNow.addingTimeInterval(5 * 86400 + 15 * 3600)),
     ])
+    // QuotaSummary 是 Dock 大字、详情窗口、右键菜单三处共用的取数层，
+    // 断言重点只有一条：**摘要里不得出现另一来源的残留**。真实用户看到的
+    // 坏法正是这个——New API 有 ¥1721.19，菜单却写「暂无额度数据」。
+    let walletSummary = QuotaSummary.of(.newAPI(wallet), now: menuNow)
+    if !walletSummary.hasData { failures.append("New API 摘要必须有数据") }
+    if walletSummary.source != .newAPI || !walletSummary.usesWalletChrome {
+        failures.append("New API 摘要应显式识别为钱包来源")
+    }
+    if walletSummary.bigNumber != "¥1721" {
+        failures.append("New API Dock 大字应为 ¥1721，实际 \(walletSummary.bigNumber ?? "nil"))")
+    }
+    for line in walletSummary.detailLines {
+        for residue in ["5h", "5 小时", "周", "重置", "%"] where line.contains(residue) {
+            failures.append("New API 摘要混入 Codex 残留「\(residue)」：\(line)")
+        }
+    }
+    let codexSummary = QuotaSummary.of(.codex(demoQuota, fetchedAt: menuNow), now: menuNow)
+    if !codexSummary.hasData || codexSummary.source != .codex || codexSummary.usesWalletChrome {
+        failures.append("Codex 摘要应显式识别为 Codex 来源且有数据")
+    }
+    if codexSummary.bigNumber != "92" { failures.append("Codex Dock 大字应为 92") }
+    if QuotaSummary.of(nil).hasData { failures.append("无快照时摘要不得声称有数据") }
+    // 两个来源的摘要不得互相串台：钱包摘要不带窗口文案，Codex 摘要不带金额
+    if codexSummary.detailLines.contains(where: { $0.contains("¥") }) {
+        failures.append("Codex 摘要不得出现金额")
+    }
+    if QuotaSummary.of(nil, errorText: "查询失败", now: menuNow).hasData {
+        failures.append("无快照时不得因为有错误文本就声称有数据")
+    }
+    // 有快照 + 查询失败：数据与错误必须同时出现，否则用户以为只是自然过期
+    let staleWithError = QuotaSummary.of(.newAPI(wallet), errorText: "查询失败", stale: true, now: menuNow)
+    if !staleWithError.detailLines.contains("查询失败") || !staleWithError.detailLines.contains("旧数据，仅供参考") {
+        failures.append("旧快照 + 查询失败时两者都应出现，实际 \(staleWithError.detailLines)")
+    }
+
     final class MenuTarget: NSObject {}
     let menuTarget = MenuTarget()
     defer { _ = menuTarget }
@@ -164,21 +379,38 @@ func verify() throws {
             failures.append("\(label)：缺少应禁用的项「\(want)」")
         }
         // 动作项必须真的绑上 target 与 action，否则点了不会有反应
-        for item in menu.items where item.title == "立即刷新额度" {
+        for item in menu.items
+        where item.title == ProviderProfile.codex.dockRefreshTitle
+            || item.title == ProviderProfile.newAPI.dockRefreshTitle {
             if item.action == nil || item.target == nil {
                 failures.append("\(label)：刷新项缺少 target/action")
             }
         }
     }
 
-    checkMenu(AppDelegate.buildDockMenu(target: menuTarget, quota: demoQuota, stale: false,
+    checkMenu(AppDelegate.buildDockMenu(target: menuTarget, snapshot: .codex(demoQuota, fetchedAt: Date()), stale: false,
                                         loading: false, errorText: nil, cpu: 0.42, gpu: 0.30, memory: 0.61,
                                         now: menuNow),
               "正常状态",
-              enabledTitles: ["立即刷新额度", "打开主窗口", "设置…", "显示模式", "播放角色律动"],
+              enabledTitles: [ProviderProfile.codex.dockRefreshTitle, "打开主窗口", "设置…", "显示模式", "播放角色律动"],
               disabledTitles: ["5 小时窗口　剩余 92%", "CPU　42%", "GPU　30%", "内存　61%"])
+    checkMenu(AppDelegate.buildDockMenu(target: menuTarget, snapshot: .newAPI(wallet), stale: false,
+                                        loading: false, errorText: nil, cpu: 0.42, gpu: 0.30, memory: 0.61,
+                                        now: menuNow),
+              "钱包状态",
+              enabledTitles: [ProviderProfile.newAPI.dockRefreshTitle, "打开主窗口", "设置…"],
+              disabledTitles: ["来源　New API"])
+    let walletMenuTitles = AppDelegate.buildDockMenu(target: menuTarget, snapshot: .newAPI(wallet), stale: false,
+                                                     loading: false, errorText: nil, cpu: 0.1, gpu: 0.1, memory: 0.1,
+                                                     now: menuNow).items.map(\.title)
+    if walletMenuTitles.contains(ProviderProfile.codex.dockRefreshTitle) {
+        failures.append("New API Dock 菜单不得出现 Codex 刷新文案")
+    }
+    if walletMenuTitles.contains(where: { $0.contains("重置") || $0.contains("5 小时") }) {
+        failures.append("New API Dock 菜单混入 Codex 窗口残留：\(walletMenuTitles)")
+    }
     for mode in [false,true] { for motion in [false,true] {
-        let menu = AppDelegate.buildDockMenu(target:menuTarget,quota:demoQuota,stale:false,loading:false,errorText:nil,
+        let menu = AppDelegate.buildDockMenu(target: menuTarget, snapshot: .codex(demoQuota, fetchedAt: Date()),stale:false,loading:false,errorText:nil,
             cpu:0.8,gpu:0.9,memory:0.5,monsterEnabled:mode,monsterMotion:motion,now:menuNow)
         let items = menu.item(withTitle:"显示模式")?.submenu?.items ?? []
         if items.count != 2 || items.filter({ $0.state == .on }).count != 1
@@ -191,17 +423,26 @@ func verify() throws {
     if !Config.default.monster.motion || Config.default.monster.enabled { failures.append("启动默认仪表、默认律动开启") }
     // 查询进行中必须禁用刷新：对应 refresh() 的 !loading 守卫，
     // 避免用户连点叠加查询
-    checkMenu(AppDelegate.buildDockMenu(target: menuTarget, quota: demoQuota, stale: false,
+    checkMenu(AppDelegate.buildDockMenu(target: menuTarget, snapshot: .codex(demoQuota, fetchedAt: Date()), stale: false,
                                         loading: true, errorText: nil, cpu: 0.42, gpu: 0.30, memory: 0.61,
                                         now: menuNow),
               "加载中",
               enabledTitles: ["打开主窗口", "设置…"],
               disabledTitles: ["正在查询…"])
     // 无数据时不能出现「旧数据，仅供参考」——没有快照就说旧数据不成立
-    let noDataTitles = AppDelegate.buildDockMenu(target: menuTarget, quota: nil, stale: true,
+    let noDataTitles = AppDelegate.buildDockMenu(target: menuTarget, snapshot: nil, stale: true,
                                                  loading: false, errorText: "查询失败",
-                                                 cpu: nil, gpu: nil, memory: nil, now: menuNow)
+                                                 cpu: nil, gpu: nil, memory: nil,
+                                                 activeSource: .codex, now: menuNow)
         .items.map(\.title)
+    let noDataWalletRefresh = AppDelegate.buildDockMenu(target: menuTarget, snapshot: nil, stale: false,
+                                                        loading: false, errorText: nil,
+                                                        cpu: nil, gpu: nil, memory: nil,
+                                                        activeSource: .newAPI, now: menuNow)
+        .items.map(\.title)
+    if !noDataWalletRefresh.contains(ProviderProfile.newAPI.dockRefreshTitle) {
+        failures.append("无快照时 New API 菜单仍须使用钱包刷新文案")
+    }
     for bogus in ["旧数据，仅供参考", "5 小时窗口　剩余 92%"] where noDataTitles.contains(bogus) {
         failures.append("无数据状态不应出现「\(bogus)」")
     }
@@ -292,6 +533,30 @@ func verify() throws {
         }
     }
 
+    // 服务地址规范化。补 https 而不是默认 http：访问令牌随 Authorization
+    // 头发出，明文 HTTP 下等于公开。
+    if NewAPISettings.normalizeBaseURL("codingplan.at-our.com") != "https://codingplan.at-our.com" {
+        failures.append("缺 scheme 时应补 https") }
+    if NewAPISettings.normalizeBaseURL("https://a.example/") != "https://a.example" {
+        failures.append("尾部斜杠应被去掉") }
+    if NewAPISettings.normalizeBaseURL("  https://a.example  ") != "https://a.example" {
+        failures.append("首尾空白应被去掉") }
+    for invalid in ["", "   ", "ftp://a.example", "https://", "not a url", "file:///etc"] {
+        if NewAPISettings.normalizeBaseURL(invalid) != nil {
+            failures.append("无效地址应被拒绝：\(invalid)") }
+    }
+    if NewAPISettings.canCheck(baseURL: "https://a.example", hasToken: false) {
+        failures.append("无令牌时不应允许检查连接") }
+    if NewAPISettings.canCheck(baseURL: "", hasToken: true) {
+        failures.append("无地址时不应允许检查连接") }
+    if !NewAPISettings.canCheck(baseURL: "a.example", hasToken: true) {
+        failures.append("地址与令牌齐备时应允许检查连接") }
+    // New API 快照不提供 Codex 窗口，界面据此不画时间环。
+    let newAPISnapshot = QuotaSnapshot.newAPI(wallet)
+    if newAPISnapshot.codexQuota != nil { failures.append("New API 快照不得携带 Codex 窗口") }
+    if newAPISnapshot.newAPIWallet == nil { failures.append("New API 快照应携带钱包") }
+    if codexSnapshot.newAPIWallet != nil { failures.append("Codex 快照不得携带钱包") }
+
     // 额度充足、无重置临近、无失败 → 无预警
     expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 92, resetIn: 3600 * 3),
                                                failureStreak: 0, diskReadMBs: nil, config: alertConfig, now: alertNow)),
@@ -322,6 +587,31 @@ func verify() throws {
     expectAlerts(keys(AlertMonitor.activeAlerts(windows: alertWindows(remaining: 1, resetIn: 60),
                                                failureStreak: 99, diskReadMBs: nil, config: muted, now: alertNow)),
                  [], "关闭预警后不应有任何预警")
+
+    // 钱包预警。New API 模式下 windows 恒空，阈值用四档档位而不是百分比——
+    // 把预计可用天数换算成百分比等于伪造一个周期分母。警戒线取的是
+    // Prosperity 自己的档位边界，测试只锁「哪档触发」，不锁阈值数值。
+    func walletAlerts(_ p: NewAPI.Prosperity) -> Set<String> {
+        keys(AlertMonitor.activeAlerts(windows: [], failureStreak: 0, diskReadMBs: nil,
+                                       config: alertConfig, now: alertNow, prosperity: p))
+    }
+    expectAlerts(walletAlerts(.abundant), [], "钱包富足不应预警")
+    expectAlerts(walletAlerts(.comfortable), [], "钱包充裕不应预警")
+    expectAlerts(walletAlerts(.tight), ["wallet-tight"], "钱包拮据应预警")
+    expectAlerts(walletAlerts(.drained), ["wallet-drained"], "钱包见底应预警")
+    // 未知档位不能当成富足或无限：无消耗数据 ≠ 用不完
+    expectAlerts(walletAlerts(.unknown), [], "富足度未知不应误报，但也不能当成富足")
+    // 不传 prosperity（Codex 路径）时不得冒出钱包预警
+    expectAlerts(keys(AlertMonitor.activeAlerts(windows: [], failureStreak: 0, diskReadMBs: nil,
+                                                config: alertConfig, now: alertNow)),
+                 [], "Codex 路径不得产生钱包预警")
+    // 钱包预警的文案必须带金额，否则弹出的是一句无法行动的提醒
+    let drainedMessage = AlertMonitor.message(for: "wallet-drained", windows: [], failureStreak: 0,
+                                              diskReadMBs: nil, config: alertConfig, now: alertNow,
+                                              wallet: "¥1721")
+    if !drainedMessage.body.contains("¥1721") {
+        failures.append("钱包预警文案应带余额：\(drainedMessage.body)")
+    }
 
     // 跃迁去重：同一条件持续成立只触发一次，条件消失后再次成立才重新触发。
     let tracker = AlertMonitor.Tracker()
@@ -500,7 +790,14 @@ func verify() throws {
     if realConfigBefore != realConfigAfter {
         throw ReadError.message("自检不得改变真实配置域")
     }
-    print("PASS: quota parsing, missing/invalid/other buckets, CPU and memory sampling, window title and countdown formatting, dock menu structure, config clamping, quota alerts")
+    // 真实凭据槽同样不得被自检改动。这里只比「有没有」，不比内容——
+    // 读出用户令牌再放进内存就等于自检接触了凭据。
+    let realTokenAfter = KeychainStore.read(service: KeychainStore.Slot.service,
+                                            account: KeychainStore.Slot.accountToken)
+    if (realTokenBefore == nil) != (realTokenAfter == nil) {
+        throw ReadError.message("自检不得改变真实凭据槽")
+    }
+    print("PASS: quota parsing, missing/invalid/other buckets, New API wallet parsing, unit conversion, prosperity levels, piggy bank anatomy, CPU and memory sampling, window title and countdown formatting, dock menu structure, config clamping, quota alerts")
 }
 
 if CommandLine.arguments.contains("--self-test") {
@@ -601,6 +898,15 @@ if CommandLine.arguments.contains("--render-test") {
             view.resetLabel = NetworkStatus.resetLabel(now.addingTimeInterval(seconds), now: now)
             continue
         }
+        // New API 来源：夹具直接注入「视图最终该是什么样」，而不是让回归脚本
+        // 自己拼 displayNumber/showsQuotaRing —— 那样脚本和实现会各自演化，
+        // 改了一边另一边照样过，两边对不上时没人发现。
+        // 传法 wallet=<Dock 大字>。remaining 仍传 nil，因为该来源没有百分比。
+        if key == "wallet", parts.count == 2 {
+            view.displayNumber = parts[1]
+            view.showsQuotaRing = false
+            continue
+        }
         if key == "nomemory" { view.memory = nil; continue }
         if key == "nodisk" { view.diskRead = nil; view.diskWrite = nil; continue }
         if key == "nomemorymeter" { view.showMemory = false; continue }
@@ -668,6 +974,28 @@ if CommandLine.arguments.contains("--monster-render-test") || CommandLine.argume
         (state == "time-zero" || state == "time-short" ? 0 : (state == "time-full" || state == "time-expired" || state == "time-week" ? 1 : 0.28))
     scene.shortTime = fixtureTime(minutes:300,fraction:shortFraction)
     scene.weekTime = fixtureTime(minutes:10080,fraction:weekFraction)
+    // 零钱罐夹具：piggy-<档位>，以及 piggy-leak（故意喂满时间窗口）。
+    if state.hasPrefix("piggy-") {
+        let key = String(state.dropFirst("piggy-".count))
+        scene.prosperity = key == "leak" ? .comfortable : (NewAPI.Prosperity(rawValue: key) ?? .comfortable)
+        scene.blend = 1
+        // New API 没有百分比，也没有时间窗口。这两项必须为 nil，
+        // 渲染层据此不画太阳与时间环——保留旧数值等于展示不存在的数据。
+        scene.remaining = nil
+        scene.weekRemaining = nil
+        scene.shortTime = MonsterTimeWindow(window: nil, now: fixtureNow)
+        scene.weekTime = MonsterTimeWindow(window: nil, now: fixtureNow)
+        // piggy-leak 故意把两个时间环喂满：若渲染层没有按形态屏蔽环，
+        // 这个夹具会和 piggy-comfortable 出现差异。语义检查据此断言
+        // 「零钱罐不画时间环」，而不是靠快照肉眼比对。
+        if key == "leak" {
+            let full = MonsterTimeWindow(window: QuotaWindow(used: 0, minutes: 300,
+                resetsAt: fixtureNow.addingTimeInterval(300*60)), now: fixtureNow)
+            scene.shortTime = full
+            scene.weekTime = MonsterTimeWindow(window: QuotaWindow(used: 0, minutes: 10080,
+                resetsAt: fixtureNow.addingTimeInterval(10080*60)), now: fixtureNow)
+        }
+    }
     let dockFixture = DockView(frame:scene.frame)
     dockFixture.monsterEnabled = true
     let dockScene = dockFixture.monster
@@ -675,6 +1003,7 @@ if CommandLine.arguments.contains("--monster-render-test") || CommandLine.argume
     dockScene.remaining = scene.remaining; dockScene.weekRemaining = scene.weekRemaining
     dockScene.cpu = scene.cpu; dockScene.gpu = scene.gpu; dockScene.proxyEnabled = scene.proxyEnabled; dockScene.stale = scene.stale
     dockScene.shortTime = scene.shortTime; dockScene.weekTime = scene.weekTime
+    dockScene.prosperity = scene.prosperity; dockScene.blend = scene.blend
     if state.hasPrefix("motion-") { dockScene.style.motion = true; dockScene.phase = state == "motion-a" ? 0.4 : 0.9 }
     if state == "hidden-cpu" { dockScene.cpu = nil; dockScene.gpu = 0 }
     if state == "hidden-gpu" { dockScene.gpu = nil; dockScene.cpu = 0 }
@@ -698,6 +1027,7 @@ if CommandLine.arguments.contains("--monster-render-test") || CommandLine.argume
         delegate.monster.weekRemaining = scene.weekRemaining; delegate.monster.cpu = scene.cpu; delegate.monster.gpu = scene.gpu
         delegate.monster.proxyEnabled = scene.proxyEnabled; delegate.monster.stale = scene.stale
         delegate.monster.shortTime = scene.shortTime; delegate.monster.weekTime = scene.weekTime
+        delegate.monster.prosperity = scene.prosperity; delegate.monster.blend = scene.blend
         delegate.monsterTimeReading.font = .systemFont(ofSize:12); delegate.monsterTimeReading.alignment = .center
         delegate.monsterTimeReading.textColor = .secondaryLabelColor
         delegate.monsterTimeReading.stringValue = scene.shortTime.text(title:"5h 外圈",now:fixtureNow)+"\n"+scene.weekTime.text(title:"周 内圈",now:fixtureNow)
@@ -720,7 +1050,7 @@ if CommandLine.arguments.contains("--settings-render-test") {
     // 把设置窗口离屏渲染成 PNG。与 --details-render-test 同一手法。
     // 用途：验证面板布局（新增控件有没有被挤出可视区），以及让用户直接看到
     // 每个配置项长什么样，不必靠猜。
-    // 用法: MonsterPulse --settings-render-test <out.png> [proxy|dns|nometers|alerts-off|login-on|login-off|full]
+    // 用法: MonsterPulse --settings-render-test <out.png> [proxy|dns|nometers|alerts-off|login-on|login-off|newapi|full]
     let args = Array(CommandLine.arguments.dropFirst(2))
     let out = args.first ?? "/tmp/monsterpulse-settings.png"
     let state = args.count > 1 ? args[1] : "full"
@@ -741,6 +1071,24 @@ if CommandLine.arguments.contains("--settings-render-test") {
                                       alertResetLeadMinutes: base.alertResetLeadMinutes,
                                       alertFailureStreak: base.alertFailureStreak,
                                       diskAlertMBs: base.diskAlertMBs, proxyURL: base.proxyURL)
+    case "newapi-saved": config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
+                                      showCPU: base.showCPU, showMemory: base.showMemory, showGPU: base.showGPU, showDisk: base.showDisk,
+                                      alertsEnabled: base.alertsEnabled,
+                                      alertQuotaThreshold: base.alertQuotaThreshold,
+                                      alertResetLeadMinutes: base.alertResetLeadMinutes,
+                                      alertFailureStreak: base.alertFailureStreak,
+                                      diskAlertMBs: base.diskAlertMBs, proxyURL: base.proxyURL,
+                                      quotaSource: .newAPI,
+                                      newAPIBaseURL: "https://codingplan.at-our.com")
+    case "newapi":     config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
+                                      showCPU: base.showCPU, showMemory: base.showMemory, showGPU: base.showGPU, showDisk: base.showDisk,
+                                      alertsEnabled: base.alertsEnabled,
+                                      alertQuotaThreshold: base.alertQuotaThreshold,
+                                      alertResetLeadMinutes: base.alertResetLeadMinutes,
+                                      alertFailureStreak: base.alertFailureStreak,
+                                      diskAlertMBs: base.diskAlertMBs, proxyURL: base.proxyURL,
+                                      quotaSource: .newAPI,
+                                      newAPIBaseURL: "https://codingplan.at-our.com")
     case "dns":        config = Config(systemInterval: base.systemInterval, quotaInterval: base.quotaInterval,
                                       showCPU: base.showCPU, showMemory: base.showMemory,
                                       showGPU: base.showGPU, alertsEnabled: base.alertsEnabled,
@@ -757,6 +1105,12 @@ if CommandLine.arguments.contains("--settings-render-test") {
                                       diskAlertMBs: base.diskAlertMBs, proxyURL: "127.0.0.1:12334")
     }
     let controller = SettingsWindowController(config: config) { _ in }
+    // 勾选态必须由夹具钉死，不能读真实 UserDefaults。
+    //
+    // 真实域里「已保存访问令牌」取决于这台机器之前填过没有，基线图
+    // 不能跟着机器状态漂。强制置 false 让 newapi 夹具固定画未保存态。
+    // 「令牌已保存」这一态由真机点验覆盖，不由基准图覆盖。
+    controller.renderHasNewAPITokenOverride = state == "newapi-saved" ? true : (state == "newapi" ? false : nil)
     // 自启状态一律钉死，不读系统真值。
     //
     // 不钉的话基线图会随「用户是否开启过自启」「跑的是 .build 还是
@@ -790,20 +1144,20 @@ if CommandLine.arguments.contains("--dock-menu-dump") {
     let target = MenuTarget()
     let menu: NSMenu
     switch state {
-    case "no-data":  menu = AppDelegate.buildDockMenu(target: target, quota: nil, stale: false,
+    case "no-data":  menu = AppDelegate.buildDockMenu(target: target, snapshot: nil, stale: false,
                                                      loading: false, errorText: nil,
                                                      cpu: 0.42, gpu: 0.30, memory: 0.61, now: now)
-    case "stale":     menu = AppDelegate.buildDockMenu(target: target, quota: demo, stale: true,
+    case "stale":     menu = AppDelegate.buildDockMenu(target: target, snapshot: .codex(demo, fetchedAt: Date()), stale: true,
                                                      loading: false, errorText: nil,
                                                      cpu: 0.42, gpu: 0.30, memory: 0.61, now: now)
-    case "error":     menu = AppDelegate.buildDockMenu(target: target, quota: nil, stale: true,
+    case "error":     menu = AppDelegate.buildDockMenu(target: target, snapshot: nil, stale: true,
                                                      loading: false,
                                                      errorText: "Codex 查询超时或进程退出；请检查 CLI 登录状态和网络",
                                                      cpu: 0.42, gpu: 0.30, memory: 0.61, now: now)
-    case "loading":   menu = AppDelegate.buildDockMenu(target: target, quota: demo, stale: false,
+    case "loading":   menu = AppDelegate.buildDockMenu(target: target, snapshot: .codex(demo, fetchedAt: Date()), stale: false,
                                                      loading: true, errorText: nil,
                                                      cpu: 0.42, gpu: 0.30, memory: 0.61, now: now)
-    default:          menu = AppDelegate.buildDockMenu(target: target, quota: demo, stale: false,
+    default:          menu = AppDelegate.buildDockMenu(target: target, snapshot: .codex(demo, fetchedAt: Date()), stale: false,
                                                      loading: false, errorText: nil,
                                                      cpu: 0.42, gpu: 0.30, memory: 0.61, now: now)
     }
@@ -875,6 +1229,22 @@ if CommandLine.arguments.contains("--details-render-test") {
         details.update(windows: [], quotaAvailable: false, cpu: nil, reading: idleReading,
                        showCPU: showCPU, showMemory: showMemory, showGPU: showGPU,
                        updated: nil, loading: false, errorText: nil, stale: false)
+    case "wallet":
+        // New API 钱包视图。数字走实测值（见 docs/new-api-research.md）：
+        // 余额 122942348、近 24h 消耗 7152182、请求 107884 / 633。
+        // 不走 QuotaSummary.of 的手写字面量，而是构造真 Wallet 让摘要自己算，
+        // 否则钱包那套格式化在视觉回归里完全不被执行。
+        let site = NewAPI.SiteConfig(quotaPerUnit: 500_000, usdExchangeRate: 7,
+                                     displayType: "CNY", version: "v1.0.0-rc.25")
+        let wallet = NewAPI.Wallet(balance: 122_942_348, usedQuota: 2_571_788_418,
+                                    requestCount: 107_884, dailyBurn: 7_152_182,
+                                    dailyRequests: 633, subscriptions: [], site: site,
+                                    fetchedAt: now)
+        let lines = QuotaSummary.of(.newAPI(wallet), stale: false, now: now).detailLines
+        details.update(windows: [], quotaAvailable: false, cpu: 0.42, reading: readingForState,
+                       showCPU: showCPU, showMemory: showMemory, showGPU: showGPU,
+                       updated: now, loading: false, errorText: nil, stale: false,
+                       walletLines: lines)
     case "stale":
         details.update(windows: windows, quotaAvailable: true, cpu: 0.42, reading: readingForState,
                        showCPU: showCPU, showMemory: showMemory, showGPU: showGPU,
@@ -931,6 +1301,20 @@ final class DockView: NSView {
     let monster = MonsterView()
     var monsterEnabled = false
     var remaining: Int?
+    /// Dock 中央的大字。由 `QuotaSummary` 按来源给：Codex 是「62」（后缀「%」
+    /// 与外圈同属百分比通道，由 `remaining != nil` 隐含），New API 是「¥1721」。
+    ///
+    /// 不能只拿 `remaining` 画：New API 模式下它恒为 nil，会画成「—」，
+    /// 而实际有钱包数据。New API 也没有百分比，外圈那一整圈都跳过。
+    ///
+    /// New API 模式下 `displayNumber` 为 nil，由上面那个来源判据接手。
+    var displayNumber: String?
+    /// 是否画额度外圈。这是**来源**属性，不是数据属性：Codex 没查到数据时
+    /// 仍然画空圈（图标形状稳定），New API 永远不画（没有周期分母，
+    /// 空圈会被读成「进度还没开始」）。曾用 `remaining != nil` 代替，
+    /// 于是「还没查到」被当成「不是 Codex」，空圈整个消失——正是
+    /// 「赋值成功不等于生效」：值缺失说明不了来源。
+    var showsQuotaRing = true
     /// 一条额度轨。两条轨（5 小时窗口 / 周窗口）用同一套画法，语义统一。
     struct Rail {
         /// 已用比例（0...1），画成填充长度——这是「用量」这个量本身。
@@ -1072,29 +1456,44 @@ final class DockView: NSView {
         backdrop?.draw(in: bounds)
 
         // 旧快照的数字变橙色；首次查询失败没有快照，只画中性的横杠。
+        // 旧快照标记仍然只跟「有百分比」走：没有快照就没有旧数据，
+        // 笼统标成旧数据会掩盖「这是完全不可用」这个事实。
+        // 语义自检里「无额度快照时不可标成旧数据」断言的就是这一条。
         let markStale = stale && remaining != nil
         let ringRect = NSRect(x: 13, y: 40, width: 57, height: 57)
         let ringCenter = NSPoint(x: ringRect.midX, y: ringRect.midY)
         let radius: CGFloat = 28.5
         let track = NSBezierPath(ovalIn: ringRect)
         track.lineWidth = 6
-        NSColor.darkGray.setStroke(); track.stroke()
-        if let remaining, remaining > 0 {
-            let arc = NSBezierPath()
-            arc.lineWidth = 6
-            arc.appendArc(withCenter: ringCenter, radius: radius, startAngle: 90,
-                          endAngle: 90 - CGFloat(min(100, max(0, remaining))) * 3.6,
-                          clockwise: true)
-            (markStale || remaining <= 15 ? NSColor.systemOrange : NSColor.white).setStroke()
-            arc.stroke()
+        // New API 没有周期分母，画一个空圈会让人以为「额度进度还没开始」——
+        // 那是在表达一个不存在的量。Codex 无数据时仍画空圈。
+        if showsQuotaRing {
+            NSColor.darkGray.setStroke(); track.stroke()
+            if let remaining, remaining > 0 {
+                let arc = NSBezierPath()
+                arc.lineWidth = 6
+                arc.appendArc(withCenter: ringCenter, radius: radius, startAngle: 90,
+                              endAngle: 90 - CGFloat(min(100, max(0, remaining))) * 3.6,
+                              clockwise: true)
+                (markStale || remaining <= 15 ? NSColor.systemOrange : NSColor.white).setStroke()
+                arc.stroke()
+            }
         }
-        let numberSize: CGFloat = (remaining ?? 0) >= 100 ? 21 : 25
-        drawGlyph(remaining.map(String.init) ?? "—",
-                  in: NSRect(x: 17, y: 52, width: 38, height: numberSize + 9),
-                  size: numberSize, color: markStale ? .systemOrange : .white)
-        if remaining != nil {
-            drawGlyph("%", in: NSRect(x: 54, y: 57, width: 12, height: 20),
-                      size: 11, color: markStale ? .systemOrange : .white)
+        // 大字：New API 是金额，自带货币符号、没有百分比也没有后缀，整块居中；
+        // Codex 走原来的「数字 + %」分栏，一像素都不动。
+        if let text = displayNumber {
+            let size: CGFloat = text.count > 4 ? 15 : (text.count > 3 ? 18 : 22)
+            drawGlyph(text, in: NSRect(x: 8, y: 54, width: 84, height: size + 9),
+                      size: size, color: markStale ? .systemOrange : .white)
+        } else {
+            let numberSize: CGFloat = (remaining ?? 0) >= 100 ? 21 : 25
+            drawGlyph(remaining.map(String.init) ?? "—",
+                      in: NSRect(x: 17, y: 52, width: 38, height: numberSize + 9),
+                      size: numberSize, color: markStale ? .systemOrange : .white)
+            if remaining != nil {
+                drawGlyph("%", in: NSRect(x: 54, y: 57, width: 12, height: 20),
+                          size: 11, color: markStale ? .systemOrange : .white)
+            }
         }
         // 左上角网络状态：国家代码与探测路径的代理开关显示。
         drawGlyph(country ?? "?", in: NSRect(x: 14, y: 92, width: 37, height: 28),
@@ -1204,6 +1603,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var sleeping = false
     var loading = false
     var lastDockState = ""
+    /// 当前额度来源。M3 引入，默认 Codex——保持既有行为不变。
+    var quotaSource: QuotaSource = .codex
+    /// 最近一次成功采集的快照。Codex 走 `quota`，New API 走钱包。
+    var snapshot: QuotaSnapshot?
+    /// 请求世代。切来源或手动刷新时推进，用来丢弃在途的旧来源结果。
+    var epoch = QuotaEpoch.initial
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         queue.maxConcurrentOperationCount = 1
@@ -1250,6 +1655,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.network.stop()
             self.animationTimer?.invalidate(); self.animationTimer = nil
             self.sleeping = true; self.timers.forEach { $0.invalidate() }; self.queue.cancelAllOperations()
+            // 跨睡眠的结果一律作废：机器睡着期间额度窗口可能已重置，
+            // 醒来后收到的是睡眠前的数据反而是错的。推进世代让它的完成回调
+            // 直接丢弃。loading 也在这里复位——不这样的话，唤醒后 refresh()
+            // 会被 guard !loading 挡住，额度再也不刷新（该任务已记为真机未验证，
+            // 这里只是把世代与复位补齐，睡眠/唤醒本身仍需真机覆盖）。
+            self.epoch = self.epoch.advanced(); self.loading = false
         })
         observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
@@ -1306,18 +1717,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// - Parameter afterConfigChange: 用户刚改过预警配置。此时若是「打开」状态，
     ///   先把当前条件记为已知再判定，否则条件通常还成立着，一开设置就会弹一次。
+    /// 刷新按钮的文案随当前 Profile 走，不在 AppDelegate 里再写一遍 if。
+    var refreshTitle: String { ProviderProfile.of(quotaSource).refreshButtonTitle }
+
     func evaluateAlerts(afterConfigChange: Bool = false) {
         guard config.alertsEnabled else { return }
         let windows = (quota?.windows ?? []).map {
             AlertMonitor.Window(minutes: $0.minutes, remaining: $0.remaining, resetsAt: $0.resetsAt)
         }
         let diskReadMBs = system.diskReadBytesPerSecond.map { $0 / 1_048_576 }
+        let prosperity = snapshot?.newAPIWallet?.prosperity
+        let walletText = QuotaSummary.of(snapshot).bigNumber
         if afterConfigChange {
             alertTracker.suppress(windows: windows, failureStreak: failureStreak,
-                                  diskReadMBs: diskReadMBs, config: config)
+                                  diskReadMBs: diskReadMBs, config: config, prosperity: prosperity)
         }
         let alerts = alertTracker.update(windows: windows, failureStreak: failureStreak,
-                                         diskReadMBs: diskReadMBs, config: config)
+                                         diskReadMBs: diskReadMBs, config: config,
+                                         prosperity: prosperity, walletText: walletText)
         guard !alerts.isEmpty else { return }
         for alert in alerts {
             FileHandle.standardError.write(
@@ -1430,6 +1847,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let previous = self.config
                 self.config = updated
                 self.configChanged(previous: previous)
+            } onQuotaSourceChanged: { [weak self] next in
+                self?.switchQuotaSource(next)
             }
         }
         settings.show()
@@ -1438,14 +1857,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !loading && !sleeping else { return }
         loading = true; render()
         let operation = BlockOperation()
+        // 发起时记下世代，回来时比对。切来源不会取消在途请求
+        // （refresh() 用 guard !loading 挡住并发），所以这一步是必需的：
+        // 没有它，切到新来源后在途的 Codex 结果会覆盖新来源的显示，
+        // 而且只在 Codex 查询更慢时才出现，极难复现。
+        let issued = epoch
+        // 取数方式按来源分派。两个来源的口径完全不同，返回类型也不同，
+        // 所以各自解析成 QuotaSnapshot 之后再统一落到显示层。
         operation.addExecutionBlock { [weak self, weak operation] in
-            let result = Result { try CodexReader.read(proxy: self?.config.proxyURL,
-                                                 cancelled: { operation?.isCancelled ?? true }) }
+            let cancelled = { operation?.isCancelled ?? true }
+            let source = self?.quotaSource ?? .codex
+            let config = self?.config
+            let result = Result { () -> QuotaSnapshot in
+                switch source {
+                case .codex:
+                    let quota = try CodexReader.read(proxy: config?.proxyURL, cancelled: cancelled)
+                    return .codex(quota, fetchedAt: Date())
+                case .newAPI:
+                    guard let config, let base = config.newAPIURL else {
+                        throw ReadError.message("尚未配置 New API 服务地址")
+                    }
+                    guard let token = KeychainStore.read(service: KeychainStore.Slot.service,
+                                                         account: KeychainStore.Slot.accountToken) else {
+                        throw ReadError.message("尚未保存 New API 访问令牌")
+                    }
+                    let client = NewAPIClient(baseURL: base, accessToken: token,
+                                              proxyURL: config.newAPIProxy)
+                    return .newAPI(try client.fetchWallet(cancelled: cancelled))
+                }
+            }
             DispatchQueue.main.async {
-                guard let self else { return }; self.loading = false
+                guard let self else { return }
+                // 世代已推进：来源切换或刷新期间又发起了新请求，
+                // 这个结果直接丢弃，连 loading 都不能清——那属于新请求的状态。
+                guard self.epoch.accepts(issued) else { return }
+                self.loading = false
                 switch result {
-                case .success(let value):
-                    self.quota = value; self.updated = Date(); self.errorText = nil
+                case .success(let snapshot):
+                    self.snapshot = snapshot
+                    self.quota = snapshot.codexQuota      // New API 时为 nil，界面据此不画时间环
+                    self.updated = Date(); self.errorText = nil
                     self.failureStreak = 0
                 case .failure(let error):
                     self.errorText = error.localizedDescription
@@ -1456,6 +1907,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         queue.addOperation(operation)
+    }
+
+    /// 切换额度来源。
+    ///
+    /// 切换不只是换一个枚举值：旧来源的显示、预警基线和在途结果都要作废，
+    /// 否则会短暂出现「新来源的标签配旧来源的数字」这种自相矛盾的状态。
+    func switchQuotaSource(_ next: QuotaSource) {
+        guard next != quotaSource else { return }
+        quotaSource = next
+        // 推进世代 → 在途的旧来源结果回来时会被丢弃
+        epoch = epoch.advanced()
+        // 清空旧来源的显示与预警基线。新来源的数据到达前保持空白，
+        // 不用旧数字冒充新来源。
+        snapshot = nil
+        quota = nil
+        updated = nil
+        errorText = nil
+        failureStreak = 0
+        alertTracker.reset()
+        loading = false
+        render()
+        refresh()
     }
     @objc func changeMode(_ sender: NSSegmentedControl) {
         var appearance = config.monster
@@ -1503,7 +1976,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 主窗口与离屏夹具共用底部入口，避免渲染漏掉真实按钮。
     static func addDetailsButtons(to content: NSView, target: AnyObject?) {
-        let refresh = NSButton(title: "刷新额度", target: target, action: #selector(AppDelegate.refresh))
+        // 文案随来源变：New API 刷的是钱包，叫「刷新额度」是误导。
+        let refresh = NSButton(title: (target as? AppDelegate)?.refreshTitle ?? "刷新额度",
+                               target: target, action: #selector(AppDelegate.refresh))
         refresh.frame = NSRect(x: 22, y: 14, width: 110, height: 32)
         content.addSubview(refresh)
         let settings = NSButton(title: "设置…", target: target, action: #selector(AppDelegate.openSettings))
@@ -1515,7 +1990,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let now = Date()
         let shortWindow = quota?.windows.first(where: { $0.minutes == 300 })
         let weekWindow = quota?.windows.first(where: { $0.minutes == 10080 })
+        // 陈旧判定必须挂在 snapshot 上。原先用 `quota != nil`，而 New API
+        // 模式下 quota 恒为 nil——于是有钱包数据反而被判成「没有数据」。
+        let hasData = snapshot != nil
+        let snapshotStale = snapshot?.isStale(now: now) ?? false
+        let summary = QuotaSummary.of(snapshot, loading: loading, errorText: errorText,
+                                      stale: snapshotStale, now: now)
+        let profile = summary.profile ?? ProviderProfile.of(quotaSource)
         dock.remaining = quota?.windows.first?.remaining
+        dock.displayNumber = summary.bigNumber
+        dock.showsQuotaRing = profile.showsQuotaRing
         dock.country = network.exit?.country
         dock.proxyEnabled = network.probeProxyEnabled
         dock.monsterEnabled = config.monster.enabled
@@ -1529,21 +2013,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             scene.cpu = config.showCPU ? dock.cpu : nil
             scene.gpu = config.showGPU ? dock.gpu : nil
             scene.proxyEnabled = network.proxyEnabled
+            // New API Profile 走零钱罐：没有百分比时 remaining/weekRemaining
+            // 为 nil，太阳与时间环自然不画，只留硬币与弯眼。
+            scene.prosperity = profile.usesPiggyMonster ? snapshot?.newAPIWallet?.prosperity : nil
+            scene.blend = profile.usesPiggyMonster && snapshot?.newAPIWallet != nil ? 1 : 0
         }
         monster.needsDisplay = true
         dock.resetLabel = NetworkStatus.resetLabel(quota?.windows.first?.resetsAt)
-        // stale 的含义是「有快照但已过期」，所以必须先有数据。
-        // 之前只要有 errorText 就是 stale，首次查询失败（根本没有快照）也会
-        // 被标成过期，详情窗口与 Dock 菜单都靠各自再判一次 quotaAvailable
-        // 才没出错——这类补丁容易漏，改成在源头就不成立。
-        let hasData = quota != nil
-        dock.stale = hasData && (errorText != nil
-                                  || (updated.map { Date().timeIntervalSince($0) > 300 } ?? false))
+        // stale 的含义是「有快照但已过期」。原先用 `quota != nil` 判断，但 New API
+        // 模式下 quota 恒为 nil——有钱包数据反而被判成「没有数据」，
+        // 于是陈旧提示、详情窗口和 Dock 菜单同时失灵。改挂 snapshot。
+        dock.stale = hasData && (errorText != nil || snapshotStale)
         monster.stale = dock.stale; dock.monster.stale = dock.stale
-        monsterReading.stringValue = MonsterSummary.text(remaining:monster.remaining,week:monster.weekRemaining,
-            cpu:dock.cpu,gpu:dock.gpu,showCPU:config.showCPU,showGPU:config.showGPU,proxy:network.proxyEnabled,stale:dock.stale)
-        monsterTimeReading.stringValue = monster.shortTime.text(title:"5h 外圈",now:now)+"\n"+monster.weekTime.text(title:"周 内圈",now:now)
-        updateAnimation()
+        // 主窗口读数：钱包 Profile 没有 5h/周窗口，那两行「外圈/内圈」必须消失。
+        if profile.usesPiggyMonster {
+            let proxyText = network.proxyEnabled == nil ? "未知" : (network.proxyEnabled! ? "开" : "关")
+            let meters = ([config.showCPU ? "CPU \(dock.cpu.map { String(format: "%.0f%%", $0 * 100) } ?? "—")" : nil]
+                        + [config.showGPU ? "GPU \(dock.gpu.map { String(format: "%.0f%%", $0 * 100) } ?? "—")" : nil]
+                        + ["系统代理 \(proxyText)"]).compactMap { $0 }.joined(separator: "   ")
+            monsterReading.stringValue = ([summary.detailLines.first].compactMap { $0 } + [meters]).joined(separator: "\n")
+            monsterTimeReading.stringValue = summary.detailLines.dropFirst().joined(separator: "\n")
+        } else {
+            monsterReading.stringValue = MonsterSummary.text(remaining:monster.remaining,week:monster.weekRemaining,
+                cpu:dock.cpu,gpu:dock.gpu,showCPU:config.showCPU,showGPU:config.showGPU,proxy:network.proxyEnabled,stale:dock.stale)
+            monsterTimeReading.stringValue = monster.shortTime.text(title:"5h 外圈",now:now)+"\n"+monster.weekTime.text(title:"周 内圈",now:now)
+        }
         dock.showCPU = config.showCPU
         dock.showGPU = config.showGPU
         dock.showMemory = config.showMemory
@@ -1568,7 +2062,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             cpu: config.showCPU ? dock.cpu : nil,
             reading: system,
             showCPU: config.showCPU, showMemory: config.showMemory, showGPU: config.showGPU, showDisk: config.showDisk,
-            updated: updated, loading: loading, errorText: errorText, stale: dock.stale)
+            updated: updated, loading: loading, errorText: errorText, stale: dock.stale,
+            walletLines: profile.usesPiggyMonster ? summary.detailLines : [])
         fitWindow()
     }
     // 窗口按内容高度调整。styleMask 不含 .resizable，用户无法手动改尺寸，
@@ -1597,12 +2092,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         // 菜单仍显示内存（用户偶尔要查），但 DockView 不再持有它——
         // 数据直接从系统采样拿，不经过图标视图转一手。
-        let menu = Self.buildDockMenu(target: self, quota: quota, stale: dock.stale,
+        let menu = Self.buildDockMenu(target: self, snapshot: snapshot, stale: dock.stale,
                            loading: loading, errorText: errorText,
                            cpu: dock.cpu, gpu: dock.gpu,
                            memory: system.memoryFraction,
                            showCPU: config.showCPU, showGPU: config.showGPU,
-                           showMemory: config.showMemory, monsterEnabled: config.monster.enabled, monsterMotion: config.monster.motion)
+                           showMemory: config.showMemory, monsterEnabled: config.monster.enabled, monsterMotion: config.monster.motion,
+                           activeSource: quotaSource)
         let proxy = network.proxyEnabled.map { $0 ? "开启" : "关闭" } ?? "未知"
         let name = network.exit.flatMap { Locale(identifier: "zh_CN").localizedString(forRegionCode: $0.country) }
         let country = name ?? "未知"
@@ -1620,10 +2116,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 这样菜单结构可以脱离 Dock 单独验证——Dock 菜单只能在真实 Dock 上
     /// 右键才弹得出来，没法注入，但「有哪些项、哪些被禁用、文案是否如实」
     /// 是可以断言的。
-    static func buildDockMenu(target: AnyObject, quota: Quota?, stale: Bool, loading: Bool,
+    static func buildDockMenu(target: AnyObject, snapshot: QuotaSnapshot?, stale: Bool, loading: Bool,
                               errorText: String?, cpu: Double?, gpu: Double?, memory: Double?,
                               showCPU: Bool = true, showGPU: Bool = true, showMemory: Bool = true,
                               monsterEnabled: Bool = false, monsterMotion: Bool = true,
+                              activeSource: QuotaSource = .codex,
                               now: Date = Date()) -> NSMenu {
         // 两个来自官方文档的硬约束，不照做菜单就不工作：
         // 1. Dock 菜单的 target/action 不由系统代为分发，文档要求选中项后
@@ -1650,18 +2147,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return item
         }
 
-        // 状态区：与详情窗口共用同一套取数和文案格式化
-        if let quota, !quota.windows.isEmpty {
-            for value in quota.windows {
-                menu.addItem(info("\(QuotaFormat.windowTitle(minutes: value.minutes))　剩余 \(value.remaining)%"))
-                if let reset = value.resetsAt.map({ QuotaFormat.countdown(to: $0, now: now) }) {
-                    menu.addItem(info("　重置 \(reset)"))
-                }
-            }
-            // 与详情窗口一致：没有快照时不说「旧数据」
-            if stale { menu.addItem(info("旧数据，仅供参考")) }
+        // 状态区：文案由 QuotaSummary 统一给出，菜单与详情窗口、Dock 大字
+        // 共用同一套取数。此前这段自己按 quota.windows 生成，而 New API
+        // 模式下 quota 恒为 nil，于是明明有 ¥1721.19 却显示「暂无额度数据」。
+        let summary = QuotaSummary.of(snapshot, loading: loading, errorText: errorText,
+                                      stale: stale, now: now)
+        if summary.hasData {
+            // 来源标识放第一行：两个来源的数字长得完全不一样，
+            // 不标明来源用户会以为看错了账户。
+            menu.addItem(info("来源　\(summary.sourceLabel)"))
+            for line in summary.detailLines { menu.addItem(info(line)) }
         } else {
-            menu.addItem(info(loading ? "正在查询额度…" : "暂无额度数据"))
+            menu.addItem(info(loading ? "正在查询…" : "暂无数据"))
             if let errorText { menu.addItem(info(errorText)) }
         }
         menu.addItem(.separator())
@@ -1677,8 +2174,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(.separator())
         // 查询进行中禁用刷新，而不是让点了没反应——对应 refresh() 里的
-        // !loading 守卫，把「不会叠加正在执行的查询」如实暴露给用户
-        menu.addItem(action(loading ? "正在查询…" : "立即刷新额度",
+        // !loading 守卫，把「不会叠加正在执行的查询」如实暴露给用户。
+        // 文案走 Profile：有快照用快照来源；无快照时用 activeSource
+        //（值缺失不能反推来源，必须由调用方显式传入）。
+        let refreshProfile = summary.profile ?? ProviderProfile.of(activeSource)
+        let refreshTitle = refreshProfile.dockRefreshTitle
+        menu.addItem(action(loading ? "正在查询…" : refreshTitle,
                             #selector(AppDelegate.dockMenuRefresh), enabled: !loading))
         menu.addItem(action("打开主窗口", #selector(AppDelegate.dockMenuShowDetails)))
         menu.addItem(action("设置…", #selector(AppDelegate.dockMenuSettings)))
@@ -1749,5 +2250,7 @@ for sig in [SIGTERM, SIGINT] {
     signalSources.append(source)   // 必须保留引用，释放后监听失效
 }
 defer { signalSources.forEach { $0.cancel() } }
+
+// TEMP-AUDIT: New API 模式下的界面复盘
 
 application.run()

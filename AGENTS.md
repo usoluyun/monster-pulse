@@ -30,7 +30,7 @@ Swift + AppKit，零第三方依赖。`app/` 是全部源码，`app/Sources/` �
 ```sh
 bash app/build.sh                      # Release(-O)，产物在 app/.build/
 app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse --self-test
-bash app/tests/render-regress.sh       # 视觉回归（74 张图 + 3 项语义检查，容差 24）
+bash app/tests/render-regress.sh       # 视觉回归（93 张图 + 4 项语义检查，容差 24）
 bash app/tests/run-abnormal-tests.sh   # 查询失败 10 场景
 bash app/tests/run-termination-tests.sh # 退出路径 2 条
 bash app/tests/run-perf-test.sh        # 性能验收（3 轮，约 75 分钟）
@@ -44,7 +44,7 @@ bash app/tests/run-perf-test.sh        # 性能验收（3 轮，约 75 分钟）
 | `--probe` | 读真实额度，单次。非零退出即失败，不用模拟值代替 |
 | `--network-probe` | 优先使用设置中的应用代理，留空时用系统代理，探测出口国家，单次；失败返回非零。终端结果不代替 GUI 启动验证 |
 | `--render-test` | Dock 图标离屏渲染，规格见 `tests/render-regress.sh` 的 `CASES` |
-| `--details-render-test` | 详情窗口离屏渲染：`normal` / `no-data` / `stale` / `error` / `loading` / `*-no-meters` / `no-gpu` |
+| `--details-render-test` | 详情窗口离屏渲染：`normal` / `no-data` / `stale` / `error` / `loading` / `*-no-meters` / `no-gpu` / `wallet` |
 | `--settings-render-test` | 设置面板离屏渲染，并输出 `layout:` 诊断（`render-regress.sh` 据此判 FAIL）。状态：`proxy` / `dns` / `nometers` / `alerts-off` / `login-on` / `login-off` / `full` |
 | `--dock-menu-dump` | 打印 Dock 菜单的启用态、标题与 action 选择器，人工点验时的对照依据 |
 | `--monster-render-test` | 原生 Monster Dock：normal / 100 / 70 / 50 / 15 / 0 / unknown / stale / cpu / gpu / off / large / custom / motion-a / motion-b / idle / hidden-cpu / hidden-gpu |
@@ -134,6 +134,23 @@ Dock 启动就永远查询超时。**我在终端验证了很多轮，方向完�
 同理，视觉基准图**必须由当前构建生成**，容差 24（CoreText 抗锯齿跨编译抖动约
 22/255；同一二进制两次渲染差异为 0）。容器输入固定化，不要用 `Date()`。
 
+**`--update` 后基线文件的字节变化不等于外观变化。** 重新编译会让几乎所有
+基线在字节层重写（实测一次干净重建改了 32 个，其中 29 个超容差像素为 0、
+最大差 22）。分诊办法是量化而不是看 `getbbox()`——`getbbox()` 对 1/255 的
+抖动也敏感，会把「什么都没变」报成整图不同：
+
+```sh
+python3 -c "
+from PIL import Image
+a=Image.open('新图.png').convert('RGB').getdata(); b=Image.open('基线.png').convert('RGB').getdata()
+over=sum(1 for p,q in zip(a,b) if max(abs(x-y) for x,y in zip(p,q))>24)
+print('超容差像素', over)"
+```
+
+超容差为 0 就是抖动；非 0 才需要逐张看图。**新夹具的第一版基线尤其要
+看图**——本次就靠它发现 `preferredHeight` 漏算行高，基线图里磁盘行压到
+按钮上、底部明细被截断，肉眼一眼可见，逐像素比对反而「通过」。
+
 ## 6. 夹具要走真实函数，不要写死字面量
 
 曾经把倒计时文案写成字面量 `"3 小时 12 分后"`，导致 `countdown()` 在视觉回归里
@@ -152,6 +169,12 @@ Dock 启动就永远查询超时。**我在终端验证了很多轮，方向完�
 用 `precondition` 会 SIGTRAP 且 stderr 不冲刷，排查时只拿到空白。改成收集式
 断言：跑完全部用例后汇总输出，退出码 1。
 
+**新写的断言要注入一次故障验证它真的能挡住。** 断言写完就绿，说明它可能
+只是在描述现状。做法是把被测条件改回错误取值，确认它变红，再改回来。
+本次对「外圈由来源决定」这条断言双向验证过：把 New API 的圈打开 → 3 条
+wallet 用例红；把条件改回 `remaining != nil` → 「Codex 无数据时外圈必须
+保留」那条红。两个方向都挡住，才算锁住了。
+
 ## 9. 每个功能要单独验证，不能拿 A 的证据当 B 的
 
 我曾断言「开机自启和系统通知是同一签名约束，都需 Developer ID」，并把这句写进
@@ -169,6 +192,26 @@ AGENTS.md、README、验证报告和待办。**这条结论从未实测**——�
 
 规则：写进 AGENTS.md / 报告的任何能力判断，必须能指回一次真实执行；
 指不回去就标注「未验证」，不要用类推填空。
+
+## 10. 「值缺失」说明不了「来源」
+
+第 3 条的反面坑。给两个来源做同一套界面时，我用 `remaining != nil` 推断
+「是不是 Codex 来源」——因为 New API 模式下 `remaining` 恒为 nil。结果
+Codex **尚未查到数据**时（同样是 nil）被当成 New API，额度外圈整个不画，
+图标形状随查询状态跳变。同一处判断也让有钱包数据的界面显示「暂无额度数据」。
+
+规则：来源是显式属性，用独立字段或枚举表达，不要从某个数据字段的
+有无反推。判据要覆盖「值缺失」这一态——它在每个来源下都可能发生，
+而它恰恰是 UI 最容易出错的时候。
+
+## 11. 高度计算与布局必须同源改
+
+第 2 条的延伸。给详情窗口加了一组新行，`layout()` 里排进去了，
+`preferredHeight` 没算——窗口比内容矮，最后几行被裁掉，底部明细整个看不见。
+而离屏渲染按 content 的 frame 走，**渲染出来是对的**，只有真窗口会裁。
+
+规则：新增/删除任何参与布局的行，同一个提交里把布局与高度计算一起改；
+并让高度计算里不出现 `count - 1` 这种在 count 为 0 时变负的写法。
 
 ---
 

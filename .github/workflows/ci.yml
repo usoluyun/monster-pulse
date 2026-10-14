@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  self-test:
+    # 与 release-dmg 一致用 macos-15，保证本机 SDK / 系统采样路径可用。
+    runs-on: macos-15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Build app
+        run: bash app/build.sh
+
+      - name: Run unit self-test
+        run: |
+          APP="app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse"
+          "$APP" --self-test

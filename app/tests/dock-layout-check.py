@@ -74,6 +74,34 @@ def ring_white(name):
 
 check(ring_white('quota-full') > 100 and ring_white('quota-empty') == 0,
       '剩余圆环必须满额全亮、耗尽为空，方向不能反成已用')
+
+def annulus_lit(name):
+    """外圈下弧的非背景像素数（轨道暗灰、弧线亮，都算）。
+
+    只取 y>=84 那一段：金额大字占 y 54–78，整环去量会把文字当成圆环——
+    第一次写这条断言就是这么错的，实测 wallet-1721 数出几百个「环上像素」。
+    实测分离度很干净：Codex 各例 925，New API 各例 0。
+    """
+    w,h,c,data = load(name)
+    count = 0
+    for y in range(h):
+        for x in range(w):
+            py = 128-y*128/h
+            if py < 84:
+                continue
+            radius = ((x*128/w-41.5)**2+(py-68.5)**2)**0.5
+            if 26.5 <= radius <= 30.5 and max(data[(y*w+x)*c:(y*w+x)*c+3]) > 35:
+                count += 1
+    return count
+
+# 正反两条一起锁：画不画外圈由**来源**决定，不由「有没有百分比」决定。
+# 只锁 New API 会漏掉反向错误——曾用 remaining != nil 推断来源，于是 Codex
+# 还没查到数据时（remaining 同样是 nil）空圈整个消失，图标形状随查询状态跳变。
+for name in ['wallet-1721', 'wallet-short', 'wallet-5digits']:
+    check(annulus_lit(name) == 0,
+          f'{name} 不得画额度外圈：New API 没有周期分母，空圈会被读成「进度还没开始」')
+check(annulus_lit('no-quota') > 100, 'Codex 尚无数据时外圈必须保留，否则图标形状随查询状态跳变')
+check(annulus_lit('normal-92') > 100, 'Codex 有数据时外圈必须保留')
 def proxy_pixels(name):
     w,h,c,data = load(name)
     return bytes(channel for y in range(h) for x in range(w)

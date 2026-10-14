@@ -52,6 +52,7 @@ build_for() {
   local target="$1" out="$2"
   swiftc -O -swift-version 5 -target "$target-apple-macosx13.0" \
     -module-cache-path .build/module-cache -framework AppKit \
+    -framework LocalAuthentication \
     Sources/*.swift -o "$out"
 }
 

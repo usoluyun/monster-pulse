@@ -49,4 +49,43 @@ for suffix in ('','-small'):
                          for x in range(max(0,int(px)-1),min(f.width,int(px)+2))
                          for y in range(max(0,int(py)-1),min(f.height,int(py)+2))]
             assert max(differences)>15, f'{suffix}: clipped corner ({cx},{cy}) ring {inset}'
-print('PASS: Monster area, proxy, motion, independent time rings and 43pt corner clearance')
+
+# The piggy bank has no time window, so neither progress nor the empty tracks may appear.
+# An empty track would read as "progress not started" when the truth is that the source has
+# no such window at all.
+#
+# Compared against the piggy-leak fixture, which is handed two fully elapsed time windows.
+# If the renderer ignored them, leak would differ from the normal piggy fixture. Asserting
+# equality proves the suppression on the renderer's own terms, rather than comparing two
+# differently-shaped bodies pixel by pixel (their fills differ, so that test is meaningless).
+assert not ImageChops.difference(image('piggy-comfortable'),image('piggy-leak')).getbbox(), \
+    'piggy bank renders time rings even when windows are supplied'
+
+# The smile must survive at 43pt. A deeper smile arcs the eyes into a thinner crescent,
+# so dark coverage shrinks as prosperity rises — the direction is inverted from intuition,
+# but a monotonic gap of this size proves the eye shape really changes on the Dock icon.
+# A smile that only reads in the 128pt fixture is an indistinguishable oval at 43pt.
+def eye_coverage(state):
+    img=image(state); s=img.width/256
+    # Face region in the 256px design space, covering both eyes of the piggy form.
+    return sum(1 for y in range(int(158*s),int(202*s)) for x in range(int(94*s),int(170*s))
+               if sum(img.getpixel((x,y)))/3<120)
+smile=[eye_coverage('piggy-'+state) for state in ('drained','tight','comfortable','abundant')]
+assert smile==sorted(smile,reverse=True) and smile[0]-smile[-1]>60, f'smile not readable at 43pt: {smile}'
+
+# Coins encode absolute amount, so the richest state must paint strictly more of them.
+# Colour is sampled from the actual render rather than hard-coded: anti-aliasing at 43pt
+# shifts the exact value, and a hard-coded hex would pass locally and fail elsewhere.
+def coin_pixels(img):
+    # Count gold-ish pixels rather than matching an exact hex: anti-aliasing at 43pt and
+    # the 0.35pt coin stroke both shift the value, so a hard-coded colour matches nothing.
+    # Gold reads as R>G>B with a wide gap between R and B, which no palette colour here has.
+    return sum(1 for pixel in img.getdata()
+               if pixel[0]-pixel[2]>60 and pixel[0]>130 and pixel[1]>pixel[2])
+counts={state:coin_pixels(image(state)) for state in
+        ('piggy-abundant','piggy-comfortable','piggy-tight','piggy-drained')}
+assert counts['piggy-abundant']>counts['piggy-comfortable']>counts['piggy-tight']>counts['piggy-drained']>0, f'coins not monotonic: {counts}'
+# No consumption data must not be drawn as zero coins: that would claim an empty wallet.
+assert coin_pixels(image('piggy-unknown'))==0, 'unknown prosperity painted coins'
+assert ImageChops.difference(image('piggy-abundant'),image('piggy-drained')).getbbox(), 'abundance is visually identical'
+print('PASS: Monster area, proxy, motion, independent time rings, 43pt corner clearance and piggy bank coins')

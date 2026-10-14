@@ -182,7 +182,7 @@ final class DetailsView: NSView {
     }
 
     private let header = NSTextField(labelWithString: "Codex 订阅额度")
-    private let empty = NSTextField(labelWithString: "暂无额度数据")
+    private let empty = NSTextField(labelWithString: "暂无数据")
     private let dividerOne = NSBox()
     private let dividerTwo = NSBox()
     private let footer = NSTextField(labelWithString: "")
@@ -194,6 +194,10 @@ final class DetailsView: NSView {
     /// 内存 / 压缩 / Swap 的文字明细，比一根条承载更多数字
     private let memoryDetail = NSTextField(labelWithString: "")
     private var quotaRows: [QuotaRowView] = []
+    /// New API 钱包行。与额度行分开：没有百分比就没有进度条。
+    private var walletRows: [NSTextField] = []
+    /// 钱包行高。布局与 preferredHeight 都取这个值，避免两处各写一个数字。
+    private static let walletRowHeight: CGFloat = 15
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -219,7 +223,8 @@ final class DetailsView: NSView {
     func update(windows: [(title: String, used: Int, remaining: Int, reset: String?)],
                 quotaAvailable: Bool, cpu: Double?, reading: SystemReading,
                 showCPU: Bool, showMemory: Bool, showGPU: Bool, showDisk: Bool? = nil,
-                updated: Date?, loading: Bool, errorText: String?, stale: Bool) {
+                updated: Date?, loading: Bool, errorText: String?, stale: Bool,
+                walletLines: [String] = []) {
         if quotaRows.count != windows.count {
             quotaRows.forEach { $0.removeFromSuperview() }
             quotaRows = windows.map { _ in
@@ -233,7 +238,22 @@ final class DetailsView: NSView {
         for (row, item) in zip(quotaRows, windows) {
             row.update(title: item.title, used: item.used, remaining: item.remaining, reset: item.reset)
         }
-        empty.isHidden = quotaAvailable
+        // 钱包行存在时也必须隐藏「暂无数据」——两行同时出现会互相压字。
+        empty.isHidden = quotaAvailable || !walletLines.isEmpty
+        // 标题随来源走。写死「Codex 订阅额度」会让 New API 用户以为看错了账户。
+        header.stringValue = walletLines.isEmpty ? "Codex 订阅额度" : "New API 账户余额"
+        // 钱包行独立于额度行：New API 没有百分比进度条，硬套进 QuotaRowView
+        // 只能把「剩余比例」显示成假的 0。行数变化时重建，插在分隔线之前。
+        if walletRows.count != walletLines.count {
+            walletRows.forEach { $0.removeFromSuperview() }
+            walletRows = walletLines.map { _ in
+                let label = NSTextField(labelWithString: "")
+                label.font = .systemFont(ofSize: 12)
+                addSubview(label)
+                return label
+            }
+        }
+        for (label, text) in zip(walletRows, walletLines) { label.stringValue = text }
         // 被配置关掉的指标整行隐藏，而不是显示成「—」——关掉就是不想看
         cpuRow.isHidden = !showCPU
         cpuRow.update(showCPU ? cpu : nil)
@@ -288,11 +308,19 @@ final class DetailsView: NSView {
     /// 内容总高度，供窗口按内容调整大小。
     var preferredHeight: CGFloat {
         var total: CGFloat = 17 + Gap.afterHeader          // header
-        if quotaRows.isEmpty {
+        // 额度区：额度行与钱包行共用一段高度，两者都不存在才显示「暂无数据」。
+        // 原先只算 quotaRows，加了钱包行后窗口比内容矮——窗口会强制覆盖
+        // contentView 的 frame，于是最后一行被裁掉，而离屏渲染按 content 的
+        // frame 走，**完全看不出来**。高度与 layout() 必须同源改。
+        if quotaRows.isEmpty && walletRows.isEmpty {
             total += 16
         } else {
-            total += CGFloat(quotaRows.count) * QuotaRowView.height
-            total += CGFloat(quotaRows.count - 1) * Gap.betweenQuota
+            if !quotaRows.isEmpty {
+                total += CGFloat(quotaRows.count) * QuotaRowView.height
+                total += CGFloat(quotaRows.count - 1) * Gap.betweenQuota
+            }
+            total += CGFloat(walletRows.count) * Self.walletRowHeight
+            total += CGFloat(max(0, walletRows.count - 1)) * Gap.betweenQuota
             total += Gap.beforeDivider + 1 + Gap.afterDivider
         }
         // 被隐藏的计量行不占高度，也不出现在其前后的间隔里
@@ -328,12 +356,17 @@ final class DetailsView: NSView {
         }
 
         place(header, 17, gap: Gap.afterHeader)
-        if quotaRows.isEmpty {
+        if quotaRows.isEmpty && walletRows.isEmpty {
             place(empty, 16, gap: Gap.beforeDivider)
         } else {
-            for (index, row) in quotaRows.enumerated() {
-                let gap = index == quotaRows.count - 1 ? Gap.beforeDivider : Gap.betweenQuota
-                place(row, QuotaRowView.height, gap: gap)
+            // 额度行与钱包行排成一段：beforeDivider 只给整段最后一项，
+            // 否则两段各自要一次 beforeDivider，分隔线会被推远一格。
+            var section: [(view: NSView, height: CGFloat)] = []
+            for row in quotaRows { section.append((row, QuotaRowView.height)) }
+            for label in walletRows { section.append((label, DetailsView.walletRowHeight)) }
+            for (index, item) in section.enumerated() {
+                let gap = index == section.count - 1 ? Gap.beforeDivider : Gap.betweenQuota
+                place(item.view, item.height, gap: gap)
             }
             place(dividerOne, 1, gap: Gap.afterDivider)
         }

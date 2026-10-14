@@ -3,6 +3,7 @@
 ## 规划
 
 - [项目里程碑](roadmap.md)：当前阶段完成情况及后续里程碑的范围、依赖和验收标准。
+- [M3 Provider Profile 与 CI 验收待办](m3-settings-ia-todo.md)：方案 B 已落地；CI + Dock 点验通过（2026-10-14），见 [PR #1](https://github.com/usoluyun/monster-pulse/pull/1)。
 
 ## 设计
 
@@ -21,3 +22,4 @@
 上述文档从早期 Codex Dock PoC 迁入，保留原始日期、测量数据和历史名称。2026-10-06 源码迁入 `app/`，可执行文件 `CodexDock` 更名为 `MonsterPulse`。历史章节保留当时的文件名与结果，后续变化按日期追加；当前使用说明以仓库根目录的 [README](../README.md) 为准。
 
 性能记录包含不同阶段的测量与纠正，不能将某台机器上的结果视为通用保证。后续实测应追加日期、环境和结论，避免覆盖历史结果。
+- [M3 New API 接入调研](new-api-research.md)：真实接口、Token 权限、人民币换算与额度来源切换方案。

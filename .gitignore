@@ -2,3 +2,8 @@
 **/__pycache__/
 .DS_Store
 /output/
+
+# opencode 项目级 MCP 配置：Linear / Notion 官方 remote server + OAuth。
+# 凭据存在 ~/.local/share/opencode/auth.json，不在本文件内。
+# 不入库：这是本机的上下文取舍，不应让所有贡献者默认加载这两个 MCP。
+opencode.json
