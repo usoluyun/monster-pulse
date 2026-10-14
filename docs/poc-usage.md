@@ -20,7 +20,7 @@ app/.build/MonsterPulse.app/Contents/MacOS/MonsterPulse --probe
 open app/.build/MonsterPulse.app
 ```
 
-`--self-test` 不联网，验证额度解析、异常数据和真实系统采样。`--probe` 读取当前 CLI 账户的真实订阅额度，成功仅打印百分比、窗口长度与重置时间；不会调用模型或消耗推理额度。网络/登录失败时非零退出，不用模拟数值代替。
+`--self-test` 不联网，验证额度解析、异常数据、Provider Profile 边界与真实系统采样；PR / 推送 `main` 时由 GitHub Actions 的 [ci.yml](../.github/workflows/ci.yml) 自动跑同一命令。视觉回归（`render-regress.sh`）仍在本机执行，不作为默认 CI 门禁。`--probe` 读取当前 CLI 账户的真实订阅额度，成功仅打印百分比、窗口长度与重置时间；不会调用模型或消耗推理额度。网络/登录失败时非零退出，不用模拟数值代替。
 
 应用从 PATH、`~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin` 查找 `codex`。可通过绝对路径指定 CLI（直接启动二进制可保证环境变量传入）：
 

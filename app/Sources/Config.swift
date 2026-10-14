@@ -55,6 +55,7 @@ struct Config {
         static let proxyURL = "codexProxyURL"
         static let quotaSource = "quotaSource"
         static let newAPIBaseURL = "newAPIBaseURL"
+        static let newAPIFollowAppProxy = "newAPIFollowAppProxy"
     }
 
     var systemInterval: Double
@@ -97,7 +98,13 @@ struct Config {
     var hasNewAPIToken: Bool { KeychainStore.read(service: KeychainStore.Slot.service,
                                                     account: KeychainStore.Slot.accountToken) != nil }
 
+    /// New API 是否跟随「应用代理」。默认直连——内网域名进代理常会连不通。
+    var newAPIFollowAppProxy: Bool = false
+
     var monster = MonsterAppearance()
+
+    /// 当前来源的四表面 Profile。
+    var profile: ProviderProfile { ProviderProfile.of(quotaSource) }
 
     static let `default` = Config(systemInterval: defaultSystemInterval,
                                   quotaInterval: defaultQuotaInterval,
@@ -107,7 +114,8 @@ struct Config {
                                   alertResetLeadMinutes: defaultAlertLead,
                                   alertFailureStreak: defaultAlertStreak,
                                   diskAlertMBs: defaultDiskAlert,
-                                  proxyURL: "", quotaSource: .codex, newAPIBaseURL: "")
+                                  proxyURL: "", quotaSource: .codex, newAPIBaseURL: "",
+                                  newAPIFollowAppProxy: false)
 
     /// 每次启动都要调用，把默认值注册进易失域。
     static func registerDefaults(defaults: UserDefaults = .standard) {
@@ -126,6 +134,7 @@ struct Config {
             Key.proxyURL: "",
             Key.quotaSource: QuotaSource.codex.rawValue,
             Key.newAPIBaseURL: "",
+            Key.newAPIFollowAppProxy: false,
         ])
     }
 
@@ -158,7 +167,9 @@ struct Config {
             // 存盘值可能被手改成任意字符串，解析失败要回退默认而不是崩。
             quotaSource: d.string(forKey: Key.quotaSource)
                 .flatMap(QuotaSource.init(rawValue:)) ?? .codex,
-            newAPIBaseURL: d.string(forKey: Key.newAPIBaseURL) ?? "")
+            newAPIBaseURL: d.string(forKey: Key.newAPIBaseURL) ?? "",
+            newAPIFollowAppProxy: d.object(forKey: Key.newAPIFollowAppProxy) == nil
+                ? false : d.bool(forKey: Key.newAPIFollowAppProxy))
         if let data = d.data(forKey: "monsterAppearance"),
            let value = try? JSONDecoder().decode(MonsterAppearance.self, from: data) {
             config.monster = value.validated()
@@ -236,12 +247,19 @@ struct Config {
         return URL(string: newAPIBaseURL)
     }
 
-    /// New API 的网络策略：默认直连，不继承 Codex 的应用代理。
+    mutating func setNewAPIFollowAppProxy(_ value: Bool) {
+        newAPIFollowAppProxy = value
+        UserDefaults.standard.set(value, forKey: Key.newAPIFollowAppProxy)
+    }
+
+    /// New API 请求实际使用的代理。默认直连；仅当用户勾选「跟随应用代理」
+    /// 且应用代理可解析时才返回 URL。
     ///
-    /// 公司内网域名需要绕过代理（见 ~/.zshrc 的 NO_PROXY 约定），直接把
-    /// Codex 的 localhost 代理继承过来会把请求送进代理导致连不通。
-    /// 需要代理时由设置页单独配置。
-    var newAPIProxy: URL? { nil }
+    /// 不默认继承：公司内网域名进代理常会连不通。
+    var newAPIProxy: URL? {
+        guard newAPIFollowAppProxy, let proxy = effectiveProxy else { return nil }
+        return URL(string: proxy)
+    }
 
     mutating func setMonster(_ value: MonsterAppearance) {
         monster = value.validated()
@@ -257,7 +275,7 @@ struct Config {
         self = .default
         for key in [Key.systemInterval, Key.quotaInterval, Key.showCPU, Key.showMemory,
                     Key.showGPU, Key.showDisk, Key.alertsEnabled, Key.alertThreshold, Key.alertLead, Key.alertStreak,
-                    Key.diskAlertThreshold, Key.proxyURL, "monsterAppearance"] {
+                    Key.diskAlertThreshold, Key.proxyURL, Key.newAPIFollowAppProxy, "monsterAppearance"] {
             UserDefaults.standard.removeObject(forKey: key)
         }
     }
@@ -406,11 +424,15 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
                                       maxValue: Config.diskAlertRange.upperBound,
                                       target: nil, action: nil)
     private let diskLabel = NSTextField(labelWithString: "")
-    // 代理
+    // 网络（应用代理 + 按来源的跟随选项）
     private let proxyTitle = NSTextField(labelWithString: "应用代理")
     private let proxyField = NSTextField(string: "")
     /// 用可换行标签：labelWithString 不换行，长提示会被截断（实测过）。
     private let proxyHint = NSTextField(wrappingLabelWithString: "")
+    private let followAppProxyCheckbox = NSButton(
+        checkboxWithTitle: ProviderProfile.followAppProxyTitle, target: nil, action: nil)
+    private let walletAlertNote = NSTextField(wrappingLabelWithString:
+        "钱包预警按富足度档位：偏紧 / 见底时 Dock 图标跳动。无百分比阈值与重置窗口。")
     // 开机自启
     private let launchCheckbox = NSButton(checkboxWithTitle: "登录时自动启动",
                                           target: nil, action: nil)
@@ -481,34 +503,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         meterHint.textColor = .secondaryLabelColor
         append(meterHint, height: 32, gapBefore: 6)
 
-        append(heading("预警"), height: 15, gapBefore: 20)
-        alertsCheckbox.target = self
-        alertsCheckbox.action = #selector(checkboxChanged(_:))
-        append(alertsCheckbox, height: 20, gapBefore: 10)
-        appendSlider(thresholdLabel, thresholdSlider, height: 17, gapBefore: 8)
-        appendSlider(leadLabel, leadSlider, height: 17, gapBefore: 6)
-        appendSlider(streakLabel, streakSlider, height: 17, gapBefore: 6)
-        appendSlider(diskLabel, diskSlider, height: 17, gapBefore: 6)
-
-        append(heading("代理"), height: 15, gapBefore: 20)
-        proxyTitle.font = .systemFont(ofSize: 12)
-        proxyField.isEditable = true
-        proxyField.isBezeled = true
-        proxyField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        proxyField.placeholderString = "如 http://127.0.0.1:12334"
-        proxyField.target = self
-        proxyField.action = #selector(proxyFieldChanged)
-        content.addSubview(proxyTitle)
-        content.addSubview(proxyField)
-        rows.append(Row(view: proxyTitle, height: 17, gapBefore: 10, width: nil))
-        rows.append(Row(view: proxyField, height: 20, gapBefore: -17, width: nil))
-        proxyHint.font = .systemFont(ofSize: 10)
-        proxyHint.textColor = .secondaryLabelColor
-        proxyHint.stringValue = "用于 Codex 查询和出口 IP 探测。留空时出口探测使用系统代理；不读取 shell 代理。"
-        content.addSubview(proxyHint)
-        // 两行高度：提示文案较长，单行会被截断
-        rows.append(Row(view: proxyHint, height: 30, gapBefore: 5, width: nil))
-
+        buildAlertRows()
+        buildNetworkRows()
         buildLaunchRows()
 
         let reset = NSButton(title: "恢复默认", target: self, action: #selector(resetToDefaults))
@@ -716,6 +712,59 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         return parts.joined(separator: " · ")
     }
 
+    /// 预警区按当前 Profile 显隐：New API 不得出现「剩余% / 重置前」。
+    private func buildAlertRows() {
+        let profile = config.profile
+        append(heading("预警"), height: 15, gapBefore: 20)
+        alertsCheckbox.target = self
+        alertsCheckbox.action = #selector(checkboxChanged(_:))
+        append(alertsCheckbox, height: 20, gapBefore: 10)
+        for control in profile.settingsAlertControls {
+            switch control {
+            case .quotaThreshold:
+                appendSlider(thresholdLabel, thresholdSlider, height: 17, gapBefore: 8)
+            case .resetLead:
+                appendSlider(leadLabel, leadSlider, height: 17, gapBefore: 6)
+            case .failureStreak:
+                appendSlider(streakLabel, streakSlider, height: 17, gapBefore: 6)
+            case .diskIO:
+                appendSlider(diskLabel, diskSlider, height: 17, gapBefore: 6)
+            case .walletTierNote:
+                walletAlertNote.font = .systemFont(ofSize: 11)
+                walletAlertNote.textColor = .secondaryLabelColor
+                append(walletAlertNote, height: 32, gapBefore: 8)
+            }
+        }
+    }
+
+    /// 网络区：应用代理始终可配（出口探测 / Codex）；New API 另加「跟随」开关。
+    private func buildNetworkRows() {
+        let profile = config.profile
+        append(heading("网络"), height: 15, gapBefore: 20)
+        proxyTitle.font = .systemFont(ofSize: 12)
+        proxyField.isEditable = true
+        proxyField.isBezeled = true
+        proxyField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        proxyField.placeholderString = "如 http://127.0.0.1:12334"
+        proxyField.target = self
+        proxyField.action = #selector(proxyFieldChanged)
+        content.addSubview(proxyTitle)
+        content.addSubview(proxyField)
+        rows.append(Row(view: proxyTitle, height: 17, gapBefore: 10, width: nil))
+        rows.append(Row(view: proxyField, height: 20, gapBefore: -17, width: nil))
+        proxyHint.font = .systemFont(ofSize: 10)
+        proxyHint.textColor = .secondaryLabelColor
+        proxyHint.stringValue = profile.proxyHint
+        content.addSubview(proxyHint)
+        // 两行高度：提示文案较长，单行会被截断
+        rows.append(Row(view: proxyHint, height: 30, gapBefore: 5, width: nil))
+        if profile.capabilities.offersFollowAppProxy {
+            followAppProxyCheckbox.target = self
+            followAppProxyCheckbox.action = #selector(checkboxChanged(_:))
+            append(followAppProxyCheckbox, height: 20, gapBefore: 8)
+        }
+    }
+
     private func buildLaunchRows() {
         append(heading("启动"), height: 15, gapBefore: 20)
         launchCheckbox.target = self
@@ -848,7 +897,7 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             proxyHint.stringValue = "将使用：\(normalized)"
             proxyHint.textColor = .secondaryLabelColor
         } else if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            proxyHint.stringValue = "用于 Codex 查询和出口 IP 探测。留空时出口探测使用系统代理；不读取 shell 代理。"
+            proxyHint.stringValue = config.profile.proxyHint
             proxyHint.textColor = .secondaryLabelColor
         } else {
             proxyHint.stringValue = "无法识别为代理地址，将按不设代理处理"
@@ -871,8 +920,13 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         streakSlider.doubleValue = config.alertFailureStreak
         diskSlider.doubleValue = config.diskAlertMBs
         proxyField.stringValue = config.proxyURL
+        followAppProxyCheckbox.state = config.newAPIFollowAppProxy ? .on : .off
         // 选中段不设的话，分段控件会把两项画成同一副样子——看着像没生效。
         sourcePicker.selectedSegment = QuotaSource.allCases.firstIndex(of: config.quotaSource) ?? 0
+        if proxyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            proxyHint.stringValue = config.profile.proxyHint
+            proxyHint.textColor = .secondaryLabelColor
+        }
         refreshTokenState()
         refreshLaunchControls()
         updateLabels()
@@ -934,12 +988,25 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
         leadLabel.stringValue = "重置前 \(Int(leadSlider.doubleValue.rounded())) 分钟内"
         streakLabel.stringValue = "连续失败 \(Int(streakSlider.doubleValue.rounded())) 次"
         diskLabel.stringValue = "磁盘超过 \(Int(diskSlider.doubleValue.rounded())) MB/s"
-        // 预警关掉时三个阈值滑杆没有意义，置灰而不是隐藏——
-        // 隐藏会让用户以为这个功能不存在
+        // 预警关掉时阈值滑杆没有意义，置灰而不是隐藏——
+        // 隐藏会让用户以为这个功能不存在。只处理当前 Profile 实际挂上的控件。
         let on = config.alertsEnabled
-        for slider in [thresholdSlider, leadSlider, streakSlider, diskSlider] { slider.isEnabled = on }
-        for label in [thresholdLabel, leadLabel, streakLabel, diskLabel] {
-            label.textColor = on ? .labelColor : .disabledControlTextColor
+        let controls = Set(config.profile.settingsAlertControls)
+        if controls.contains(.quotaThreshold) {
+            thresholdSlider.isEnabled = on
+            thresholdLabel.textColor = on ? .labelColor : .disabledControlTextColor
+        }
+        if controls.contains(.resetLead) {
+            leadSlider.isEnabled = on
+            leadLabel.textColor = on ? .labelColor : .disabledControlTextColor
+        }
+        if controls.contains(.failureStreak) {
+            streakSlider.isEnabled = on
+            streakLabel.textColor = on ? .labelColor : .disabledControlTextColor
+        }
+        if controls.contains(.diskIO) {
+            diskSlider.isEnabled = on
+            diskLabel.textColor = on ? .labelColor : .disabledControlTextColor
         }
     }
 
@@ -976,6 +1043,8 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
             config.setShowMemory(sender.state == .on)
         } else if sender === diskCheckbox {
             config.setShowDisk(sender.state == .on)
+        } else if sender === followAppProxyCheckbox {
+            config.setNewAPIFollowAppProxy(sender.state == .on)
         } else {
             config.setAlertsEnabled(sender.state == .on)
         }

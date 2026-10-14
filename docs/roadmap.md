@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | [M1 · Dock 状态仪表](https://github.com/usoluyun/monster-pulse/milestone/1) | 已完成 | Codex 额度与系统指标可在 Dock 常驻查看 |
 | [M2 · Monster 状态表达](https://github.com/usoluyun/monster-pulse/milestone/2) | 已实现，验收中 | 用卡通形象变化表达系统负载和 LLM 剩余额度 |
-| [M3 · New API 用量接入](https://github.com/usoluyun/monster-pulse/milestone/3) | 规划中 | 接入用户部署的 New API，查看模型用量与可用额度 |
+| [M3 · New API 用量接入](https://github.com/usoluyun/monster-pulse/milestone/3) | 实现中 | 接入用户部署的 New API，查看模型用量与可用额度 |
 | [M4 · OpenCode Zen / Go 用量接入](https://github.com/usoluyun/monster-pulse/milestone/4) | 规划中 | 分别接入 Zen、Go，统一查看多来源用量 |
 | [M5 · 真机性能指标上报](https://github.com/usoluyun/monster-pulse/milestone/5) | 远期规划 | 汇总不同真机的应用性能与动画能耗指标 |
 
@@ -36,7 +36,9 @@
 
 设计与当前行为见 [Monster 视图设计与实现](monster-view-design.md)。本机已点验主窗口与外观入口，单帧绘制微基准已测；2026-10-08 完成当前安装版 Monster 动画 15 分钟资源采样，结果与限制见[资源用量记录](resource-usage-2026-10-08.md)。按当前需求，资源测试聚焦 Monster 场景；该次为单机、单轮、无人工压力负载的观察，功耗 / 唤醒次数与不同机器的 43pt 繁忙辨识度仍待真机验证，因此里程碑保持打开。旧版仪表的性能结果不作为本轮 Monster 动画的证据。
 
-## M3 · New API 用量接入（调研完成，尚未实施）
+## M3 · New API 用量接入（实现中）
+
+> 2026-10-14 注：已开工 **Provider Profile（方案 B）**——见 `ProviderProfile.swift` 与 [m3-settings-ia-todo.md](m3-settings-ia-todo.md)。设置按来源显隐预警/网络；`--self-test` 已补 Profile 断言；[ci.yml](../.github/workflows/ci.yml) 已加。本地自检与视觉回归已绿；里程碑标「验收中」须等 D1（Actions）+ D2（Dock 启动）两道门都过。
 
 目标：用户配置自己的 New API 服务后，查看模型消耗、剩余额度及其来源，并可作为 Dock / Monster 的额度来源。
 

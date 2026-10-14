@@ -1,10 +1,11 @@
 import Foundation
+import LocalAuthentication
 import Security
 
 /// macOS Keychain 读写。
 ///
-/// 只依赖 Foundation 与 Security，不 import AppKit，因此可以在 `--self-test`
-/// 里调用（Security 在无 NSApplication 的进程里可用）。
+/// 只依赖 Foundation / Security / LocalAuthentication，不 import AppKit，
+/// 因此可以在 `--self-test` 里调用。
 ///
 /// 为什么必须用 Keychain 而不是 UserDefaults：本项目的 `Config.proxyURL`
 /// 明文存进 UserDefaults，代码注释写明前提是「本项目只代理 localhost，
@@ -12,6 +13,19 @@ import Security
 /// 账户余额的长期凭据，明文落在 plist 里既会被备份同步，也会出现在任何
 /// 读取偏好设置的工具输出中。
 enum KeychainStore {
+    /// 禁止弹授权窗：需要用户交互时立刻失败，避免 CI / `--self-test` /
+    /// 离屏渲染挂在 securityd 上等「允许」。
+    private static func queryBase(service: String, account: String) -> [String: Any] {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        return [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecUseAuthenticationContext as String: context,
+        ]
+    }
+
     /// 读写失败时不抛错，返回 false / nil。
     ///
     /// UI 需要在用户保存设置时给出反馈，但读取失败通常意味着「没存过」
@@ -21,11 +35,7 @@ enum KeychainStore {
         guard let data = value.data(using: .utf8) else { return false }
         // 先删后写：SecItemUpdate 在项不存在时返回 errSecItemNotFound，
         // 那种情况下退回 add，两条路径都覆盖到。
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
+        let query = queryBase(service: service, account: account)
         let attributes: [String: Any] = [
             kSecValueData as String: data,
             // 令牌不进 iCloud 钥匙串，也不参与设备间同步——
@@ -43,13 +53,9 @@ enum KeychainStore {
     }
 
     static func read(service: String, account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
+        var query = queryBase(service: service, account: account)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
               let data = item as? Data else { return nil }
@@ -58,11 +64,7 @@ enum KeychainStore {
 
     @discardableResult
     static func delete(service: String, account: String) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
+        let query = queryBase(service: service, account: account)
         let status = SecItemDelete(query as CFDictionary)
         return status == errSecSuccess || status == errSecItemNotFound
     }
@@ -78,6 +80,6 @@ enum KeychainStore {
         /// 刻意与「模型调用 API Key」分开命名：调研实测两者是完全不同的
         /// 凭据体系，`middleware/auth.go` 的 UserAuth 接受账户 PAT 或控制台
         /// 访问令牌，而模型调用 Key 读不了账户接口（实测 401）。
-        static let accountToken = "account-access-token"
+        static let accountToken = "access-token"
     }
 }

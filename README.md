@@ -37,7 +37,7 @@
 
 应用读取 Codex 额度仍需已安装并登录的 Codex CLI。当前发行包使用 ad-hoc 签名，未经过 Apple 公证；要去掉首次打开时的 Gatekeeper 确认，需要配置 Developer ID 签名与公证。
 
-推送 `v*` 格式的版本标签会触发 GitHub Actions，构建并自检通用 DMG，然后把 DMG 和 SHA-256 校验文件发布到对应的 GitHub Release。工作流见 [release-dmg.yml](.github/workflows/release-dmg.yml)。
+推送到 `main` / 打开 PR 会触发 [ci.yml](.github/workflows/ci.yml)，在 macOS 上构建并跑 `--self-test`。推送 `v*` 版本标签会触发 [release-dmg.yml](.github/workflows/release-dmg.yml)，构建并自检通用 DMG，再把 DMG 与 SHA-256 校验文件发布到对应 GitHub Release。
 
 ### 从源码构建
 

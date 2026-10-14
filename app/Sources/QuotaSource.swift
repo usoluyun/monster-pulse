@@ -78,14 +78,17 @@ struct QuotaSummary {
     let bigNumber: String?
     /// 详情窗口与右键菜单逐行文案。
     let detailLines: [String]
-    /// 来源标识，让用户随时知道看到的是哪个账户的数据。
-    let sourceLabel: String
+    /// 显式来源。无快照时为 nil——不得用文案或字段有无反推。
+    let source: QuotaSource?
     /// 是否有任何可展示的数据。**不能**用 `quota != nil` 判断——
     /// New API 模式下 quota 恒为 nil，那样会把有数据判成「暂无数据」。
     let hasData: Bool
 
-    /// New API 的内容要独立成块，而不是塞进 Codex 的窗口行里。
-    var isWallet: Bool { sourceLabel != QuotaSource.codex.label }
+    var sourceLabel: String { source?.label ?? "" }
+    var profile: ProviderProfile? { source.map(ProviderProfile.of) }
+
+    /// 是否走钱包展示通道。由显式 `source` 决定，不用标签字符串比对。
+    var usesWalletChrome: Bool { profile?.capabilities.hasWallet == true }
 
     /// 状态尾注。顺序与详情窗口一致：错误 > 过期。
     ///
@@ -101,7 +104,7 @@ struct QuotaSummary {
     }
 
     static let empty = QuotaSummary(bigNumber: nil, detailLines: [],
-                                    sourceLabel: "", hasData: false)
+                                    source: nil, hasData: false)
 
     static func of(_ snapshot: QuotaSnapshot?, loading: Bool = false,
                    errorText: String? = nil, stale: Bool = false,
@@ -110,7 +113,7 @@ struct QuotaSummary {
             var lines = [loading ? "正在查询…" : "暂无数据"]
             if let errorText { lines.append(errorText) }
             return QuotaSummary(bigNumber: nil, detailLines: lines,
-                                sourceLabel: "", hasData: false)
+                                source: nil, hasData: false)
         }
         switch snapshot {
         case .codex(let quota, _):
@@ -121,7 +124,7 @@ struct QuotaSummary {
             }
             lines.append(contentsOf: footer(errorText: errorText, stale: stale))
             return QuotaSummary(bigNumber: String(window.remaining),
-                                detailLines: lines, sourceLabel: QuotaSource.codex.label,
+                                detailLines: lines, source: .codex,
                                 hasData: !quota.windows.isEmpty)
         case .newAPI(let wallet):
             let symbol = wallet.site.currencySymbol
@@ -146,7 +149,7 @@ struct QuotaSummary {
             let big = wallet.site.amount(forQuota: wallet.balance)
                 .map { "\(symbol)\(String(format: "%.0f", $0))" }
             return QuotaSummary(bigNumber: big, detailLines: lines,
-                                sourceLabel: QuotaSource.newAPI.label, hasData: true)
+                                source: .newAPI, hasData: true)
         }
     }
 }
