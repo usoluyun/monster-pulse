@@ -3,7 +3,7 @@
 ## 规划
 
 - [项目里程碑](roadmap.md)：当前阶段完成情况及后续里程碑的范围、依赖和验收标准。
-- [M3 Provider Profile 与 CI 验收待办](m3-settings-ia-todo.md)：方案 B（每来源一套四表面 Profile）、`--self-test` 进 GitHub Actions（[ci.yml](../.github/workflows/ci.yml)）、CI 绿后 Agent 验收。
+- [M3 Provider Profile 与 CI 验收待办](m3-settings-ia-todo.md)：方案 B 已落地；CI + Dock 点验通过（2026-10-14），见 [PR #1](https://github.com/usoluyun/monster-pulse/pull/1)。
 
 ## 设计
 

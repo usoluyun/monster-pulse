@@ -120,7 +120,7 @@ bash app/tests/run-termination-tests.sh
 
 ## 文档与贡献
 
-- [项目里程碑](docs/roadmap.md)：M1 已完成，M2 原生功能已实现、验收中；M3 / M4 规划用量来源，M5 规划真机性能指标上报。
+- [项目里程碑](docs/roadmap.md)：M1 已完成；M2 原生功能已实现、验收中；M3 New API + Provider Profile 已实现、验收中（PR #1）；M4 规划更多来源，M5 规划真机性能指标上报。
 - [Monster 设计与使用](docs/monster-view-design.md)
 - [Monster 资源用量记录（2026-10-08）](docs/resource-usage-2026-10-08.md)：单机 Monster 动画 15 分钟 CPU / footprint 采样及其验收限制。
 - [文档入口](docs/README.md)

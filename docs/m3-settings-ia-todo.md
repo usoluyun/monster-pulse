@@ -1,6 +1,6 @@
 # M3 · Provider Profile 与 CI 验收待办
 
-记录日期：2026-10-14。状态：**实现中**（阶段 0–T 本地已完成；D1 CI / D2 Dock 验收待推送后进行）。
+记录日期：2026-10-14。状态：**验收通过**（D1 CI 绿 + D2 Dock/Finder 点验完成，2026-10-14）。
 
 ## 决策（已拍板）
 
@@ -36,7 +36,7 @@
 - [x] 步骤：`bash app/build.sh` → `--self-test`
 - [x] 本轮不把 `render-regress` 放进默认 CI
 - [x] README / `docs/poc-usage.md` 已说明
-- [ ] 用一次推送 / PR 确认 Actions 真绿（待推送）
+- [x] 用一次推送 / PR 确认 Actions 真绿（PR #1）
 
 ---
 
@@ -78,7 +78,7 @@
 ## 阶段 C · 文档与边角
 
 - [x] `roadmap.md` / docs README 指向本待办与 ci.yml
-- [ ] README 功能列表与 M3 状态待 D2 后改为「验收中」
+- [x] README / roadmap 的 M3 状态与实现一致（见下）
 - [x] 详情 / Dock / 设置刷新文案统一走 Profile
 
 ---
@@ -87,19 +87,19 @@
 
 ### D1 · GitHub Actions（自动）
 
-- [ ] PR / 推送上 `ci.yml` 全绿
-- [ ] Agent `subscribe_github_ci` 等待终态
-- [ ] CI 失败则修到绿再进 D2
+- [x] PR / 推送上 `ci.yml` 全绿（PR #1，commit `0eb8e32`）
+- [x] Agent `subscribe_github_ci` 已收到 success
+- [x] CI 绿，进入 D2
 
 ### D2 · Agent 人工场景验收（CI 绿之后）
 
-- [ ] 本机 `--self-test` 与 CI 一致（本地已绿，推送后再对一次）
+- [x] 本机 `--self-test` 与 CI 一致再跑一遍 PASS
 - [x] 本机 `render-regress`（含 newapi / wallet）已绿并看过设置图
-- [ ] **从 Dock / Finder 启动**：Codex + 应用代理可刷新额度
-- [ ] **从 Dock / Finder 启动**：New API 直连「检查连接」与真实页面金额对照
-- [ ] 来源切换不串台
-- [ ] 右键菜单 / 主窗刷新文案随来源正确
-- [ ] 全部勾完后更新 roadmap M3 状态
+- [x] **从 Dock / Finder 启动**：Codex + 应用代理可刷新额度（用户 2026-10-14 点验）
+- [x] **从 Dock / Finder 启动**：New API 直连「检查连接」与真实页面金额对照（同上）
+- [x] 来源切换不串台（同上）
+- [x] 右键菜单 / 主窗刷新文案随来源正确（同上）
+- [x] roadmap M3 状态已更新
 
 ---
 
